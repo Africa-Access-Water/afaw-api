@@ -57,23 +57,6 @@ async function handleDonationSuccess(session) {
          ? await knex("projects").where({ id: projectId }).first()
          : null;
 
-<<<<<<< HEAD
-      await sendMail({
-        from: `"Africa Access Water" <${process.env.EMAIL_USER}>`,
-        to: donorEmail,
-        subject: `Thank you for your donation of ${currency} ${amount}`,
-        html: donorDonationConfirmationEmail(
-          donorName,
-          amount,
-          currency,
-          project ? project.name : "our mission"
-        ),
-        
-      });
-    } else {
-      console.warn("⚠️ No donor email found in session");
-    }
-=======
        // Prepare donation data for PDF generation
        const donationData = {
          id: donationId,
@@ -85,7 +68,6 @@ async function handleDonationSuccess(session) {
          created_at: new Date().toISOString(),
          message: project ? `Donation for ${project.name}` : "General donation"
        };
->>>>>>> 606d67605be0f23ed091068eac1c59c832411197
 
        // Try to generate PDF receipt
        let pdfBuffer = null;
