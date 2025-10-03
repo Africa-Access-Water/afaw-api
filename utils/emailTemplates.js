@@ -42,6 +42,83 @@ function userContactConfirmationEmail(name) {
   `;
 }
 
+function passwordResetEmail(name, resetUrl) {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8" />
+      <title>Reset Your Africa Access Water Password</title>
+      <style>
+        .button {
+          background-color: #3498db;
+          border: none;
+          border-radius: 4px;
+          color: white !important;
+          padding: 15px 32px;
+          text-align: center;
+          text-decoration: none;
+          display: inline-block;
+          font-size: 16px;
+          margin: 4px 2px;
+          cursor: pointer;
+        }
+        .button:hover {
+          background-color: #2980b9;
+        }
+      </style>
+    </head>
+    <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; margin:0; padding:0;">
+      <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
+        <tr>
+          <td align="center" style="padding-bottom: 20px;">
+            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+          </td>
+        </tr>
+        <tr>
+          <td style="color: #333333; font-size: 16px; line-height: 1.6;">
+            <p>Hello${name ? ' <strong>' + name + '</strong>' : ''},</p>
+            <p>We received a request to reset your password for your <strong>Africa Access Water (AfAW)</strong> account. If you didn't make this request, you can safely ignore this email.</p>
+            <p>To reset your password, click the button below:</p>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding: 30px 0;">
+            <a href="${resetUrl}" class="button" style="background-color: #3498db; border: none; border-radius: 4px; color: white !important; padding: 15px 32px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;">
+              Reset Password
+            </a>
+          </td>
+        </tr>
+        <tr>
+          <td style="color: #666666; font-size: 14px; line-height: 1.5; padding: 20px 0;">
+            <p>If the button above doesn't work, copy and paste this link into your browser:</p>
+            <p style="word-break: break-all; color: #3498db;">
+              ${resetUrl}
+            </p>
+            <p>This password reset link will expire in 1 hour for security reasons.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-top: 30px; border-top: 1px solid #dddddd; color: #666666; font-size: 14px; line-height: 1.5;">
+            <p>Best regards,</p>
+            <p><strong>Africa Access Water Team</strong></p>
+            <p>
+              <a href="https://africaaccesswater.org" style="color: #3498db; text-decoration: none;">www.africaaccesswater.org</a><br />
+              Phone: +260 211 231 174<br />
+              Email: <a href="mailto:info@africaaccesswater.org" style="color: #3498db;">info@africaaccesswater.org</a>
+            </p>
+            <p style="margin-top: 20px;">
+              <em>"Invest in Water, Invest in Livelihoods."</em><br/>
+              <small>Registered 501(c)(3) Nonprofit | Zambia & USA</small>
+            </p>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+  `;
+}
+
 function adminContactNotificationEmail(name, email, message) {
   return `
     <!DOCTYPE html>
@@ -155,5 +232,6 @@ module.exports = {
   adminContactNotificationEmail,
   donorDonationConfirmationEmail,
   adminDonationNotificationEmail,
+  passwordResetEmail,
 };
 

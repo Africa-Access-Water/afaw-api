@@ -81,7 +81,7 @@ async function handleDonationSuccess(session) {
 
        // Send email with or without PDF attachment
        const emailOptions = {
-         from: `"Africa Access Water" <${process.env.EMAIL_USER}>`,
+         from: `"Africa Access Water" <${config.email.user}>`,
          to: donorEmail,
          subject: 
            `Thank you for your donation of ${currency} ${amount}`,
@@ -393,7 +393,7 @@ exports.stripeWebhookHandler = async (req, res) => {
             console.log(`📧 Sending subscription cancellation notification to: ${subscription.donor_email}`);
             
             const cancellationEmailOptions = {
-              from: `"Africa Access Water" <${process.env.EMAIL_USER}>`,
+              from: `"Africa Access Water" <${config.email.user}>`,
               to: subscription.donor_email,
               subject: "Subscription Cancelled - Payment Failed",
               html: `
@@ -434,7 +434,7 @@ exports.stripeWebhookHandler = async (req, res) => {
             : `<p>Stripe will automatically retry this payment in a few days.</p>`;
           
           const emailOptions = {
-            from: `"Africa Access Water" <${process.env.EMAIL_USER}>`,
+            from: `"Africa Access Water" <${config.email.user}>`,
             to: subscription.donor_email,
             subject: subject,
             html: `

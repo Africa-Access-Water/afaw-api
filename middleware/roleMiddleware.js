@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const UserModel = require("../models/userModel");
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
+const config = require("../config/config");
+const JWT_SECRET = config.jwtSecret;
 
 // Role hierarchy: admin > manager > contributor
 const ROLE_HIERARCHY = {

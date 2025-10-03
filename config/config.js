@@ -9,6 +9,7 @@ const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT || '3001', 10),
   clientUrl: process.env.CLIENT_URL || 'http://localhost:3000',
+  dashboardUrl: process.env.DASHBOARD_URL || 'http://localhost:5173',
   corsAllowedOrigins: splitCsv(process.env.CORS_ALLOWED_ORIGINS) || [],
 
   // Auth
