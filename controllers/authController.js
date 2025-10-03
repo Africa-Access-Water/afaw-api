@@ -1,8 +1,13 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const UserModel = require("../models/userModel");
+const config = require("../config/config");
+const { passwordResetEmail } = require("../utils/emailTemplates");
 
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret"; 
+const JWT_SECRET = config.jwtSecret;
+const DASHBOARD_URL = config.dashboardUrl;
 
 // SIGN UP
 const signup = async (req, res) => {
@@ -59,6 +64,129 @@ const signup = async (req, res) => {
 
 
 // LOGIN
+// Configure nodemailer
+const transporter = nodemailer.createTransport({
+  host: config.email.host,
+  port: config.email.port,
+  auth: {
+    user: config.email.user,
+    pass: config.email.pass,
+  }
+});
+
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+    console.log("Forgot password request for email:", email, config.dashboardUrl);
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    // Find user by email
+    const user = await UserModel.findByEmail(email);
+    if (!user) {
+      // For security reasons, still return success even if email doesn't exist
+      return res.status(200).json({ message: "If an account exists with this email, you will receive password reset instructions." });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expiryTime = new Date(Date.now() + 3600000); // Token expires in 1 hour
+
+    // Save reset token and expiry to database
+    await UserModel.setResetToken(email, resetToken, expiryTime);
+
+    // Create reset URL
+    const resetUrl = `${DASHBOARD_URL}/auth/reset-password/${resetToken}`;
+
+    // Send email with the template
+    const mailOptions = {
+      from: `"Africa Access Water" <${config.email.user}>`,
+      to: email,
+      subject: 'Reset Your AfAW Password',
+      html: passwordResetEmail(user.name, resetUrl)
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    res.status(200).json({ 
+      message: "If an account exists with this email, you will receive password reset instructions." 
+    });
+
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ 
+      error: "An error occurred while processing your request" 
+    });
+  }
+};
+
+const resetPassword = async (req, res) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ error: "Token and password are required" });
+    }
+
+    // Password validation on server side as well
+    if (password.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters long" });
+    }
+
+    if (password.length > 50) {
+      return res.status(400).json({ error: "Password cannot be longer than 50 characters" });
+    }
+
+    if (!/[A-Z]/.test(password)) {
+      return res.status(400).json({ error: "Password must contain at least one uppercase letter" });
+    }
+
+    if (!/[a-z]/.test(password)) {
+      return res.status(400).json({ error: "Password must contain at least one lowercase letter" });
+    }
+
+    if (!/[0-9]/.test(password)) {
+      return res.status(400).json({ error: "Password must contain at least one number" });
+    }
+
+    if (!/[!@#$%^&*]/.test(password)) {
+      return res.status(400).json({ error: "Password must contain at least one special character (!@#$%^&*)" });
+    }
+
+    // Find user by reset token and check if token is expired
+    const user = await UserModel.findByResetToken(token);
+    if (!user) {
+      return res.status(400).json({ error: "Invalid or expired reset token" });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Update password and clear reset token
+    try {
+      const [updatedUser] = await UserModel.update(user.id, {
+        password: hashedPassword,
+        reset_token: null,
+        reset_token_expires: null
+      });
+
+      if (!updatedUser) {
+        throw new Error("Failed to update user");
+      }
+
+      res.status(200).json({ message: "Password has been reset successfully" });
+    } catch (updateError) {
+      console.error('Password update error:', updateError);
+      return res.status(500).json({ error: "Failed to update password" });
+    }
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: "An error occurred while resetting your password" });
+  }
+};
+
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -191,4 +319,13 @@ const rejectUser = async (req, res) => {
   }
 };
 
-module.exports = { signup, login, getProfile, getPendingUsers, approveUser, rejectUser };
+module.exports = { 
+  signup, 
+  login, 
+  getProfile, 
+  getPendingUsers, 
+  approveUser, 
+  rejectUser,
+  forgotPassword,
+  resetPassword 
+};

@@ -30,7 +30,7 @@ if (config.corsAllowedOrigins && config.corsAllowedOrigins.length > 0) {
 app.get("/test-email", async (req, res) => {
   try {
     await sendMail({
-      from: `"Africa Access Water" <${process.env.EMAIL_USER}>`,
+      from: `"Africa Access Water" <${config.email.user}>`,
       to: "katongobupe444@gmail.com",
       subject: "Test Email",
       html: "<h1>Hello</h1><p>This is a test.</p>"

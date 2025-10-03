@@ -7,6 +7,8 @@ const upload = multer();
 
 router.post("/signup", upload.none(), authController.signup);
 router.post("/login", upload.none(), authController.login);
+router.post("/forgot-password", upload.none(), authController.forgotPassword);
+router.post("/reset-password", upload.none(), authController.resetPassword);
 router.get("/profile", requireAnyRole(), authController.getProfile);
 router.get("/pending-users", requireAdmin(), authController.getPendingUsers);
 router.put("/approve-user/:userId", requireAdmin(), authController.approveUser);
