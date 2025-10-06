@@ -485,19 +485,32 @@ exports.stripeWebhookHandler = async (req, res) => {
  */
 exports.getDonations = async (req, res) => {
   try {
-    const { donor_id } = req.query;
-    
+    // Extract possible filter params
+    const { donor_id, status, name, currency, project_id, stripe_subscription_id, ...rest } = req.query;
+
+    // Helper to filter by params
+    const filterFn = (item) => {
+      if (donor_id && item.donor_id != donor_id) return false;
+      if (status && item.status != status) return false;
+      if (name && item.name && !item.name.toLowerCase().includes(name.toLowerCase())) return false;
+      if (currency && item.currency != currency) return false;
+      if (project_id && item.project_id != project_id) return false;
+      // Add more filters as needed
+      // Generic filter for any other param
+      for (const key in rest) {
+        if (item[key] && item[key] != rest[key]) return false;
+      }
+      return true;
+    };
+
     // Fetch one-time donations
     let donations = await Donation.findAll();
-    
     // Fetch recurring subscriptions
     let subscriptions = await Subscription.findAll();
 
-    // Filter by donor_id if provided
-    if (donor_id) {
-      donations = donations.filter(d => d.donor_id == donor_id);
-      subscriptions = subscriptions.filter(s => s.donor_id == donor_id);
-    }
+    // Apply filters
+    donations = donations.filter(filterFn);
+    subscriptions = subscriptions.filter(filterFn);
 
     // Combine them, optionally add a type field
     const allDonations = [
@@ -513,9 +526,7 @@ exports.getDonations = async (req, res) => {
     res.json(allDonations);
   } catch (error) {
     console.error("Get donations error:", error);
-    res
-      .status(500)
-      .json({ error: "Unable to fetch donations and subscriptions" });
+    res.status(500).json({ error: "Unable to fetch donations and subscriptions" });
   }
 };
 
