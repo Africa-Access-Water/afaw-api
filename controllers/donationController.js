@@ -293,9 +293,13 @@ exports.stripeWebhookHandler = async (req, res) => {
 
       case "checkout.session.expired": {
         const session = event.data.object;
-        await Donation.updateBySessionId(session.id, { status: "expired" });
-        await Subscription.updateBySessionId(session.id, { status: "expired" });
-        console.log(`⏰ Session ${session.id} expired automatically`);
+        try {
+          await Donation.updateBySessionId(session.id, { status: "expired" });
+          await Subscription.updateBySessionId(session.id, { status: "expired" });
+          console.log(`⏰ Session ${session.id} expired automatically`);
+        } catch (error) {
+          console.error(`Failed to expire session ${session.id}:`, error);
+        }
         break;
       }
 
