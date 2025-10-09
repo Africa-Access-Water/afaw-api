@@ -33,8 +33,23 @@ const generateDonationReceiptPDFBuffer = async (donation) => {
         // Generate HTML string
         const html = generateDonationReceiptHTML(donation, organization, new Date().toLocaleDateString());
 
-        // Launch headless browser
-        const browser = await puppeteer.launch();
+        let browser;
+
+        // Use different packages for local vs production
+        if (process.env.NODE_ENV === 'production') {
+            // Production: Use puppeteer-core with @sparticuz/chromium
+            const puppeteerCore = await import('puppeteer-core');
+            const chromium = await import('@sparticuz/chromium');
+            
+            browser = await puppeteerCore.default.launch({
+                args: chromium.default.args,
+                defaultViewport: chromium.default.defaultViewport,
+                executablePath: await chromium.default.executablePath(),
+                headless: chromium.default.headless,
+            });
+        } else {
+            browser = await puppeteer.launch();
+        }
         const page = await browser.newPage();
 
         await page.setContent(html, { waitUntil: 'networkidle0' });
