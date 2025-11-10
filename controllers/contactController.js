@@ -33,7 +33,7 @@ const handleContact = async (req, res) => {
     // Send admin email
     await sendMail({
       from: `"Africa Access Water" <${config.email.user}>`,
-      to: 'contact@africaaccesswater.org',
+      to: 'info@africaaccesswater.org',
       subject: `Website Contact Submission : ${name}`,
       html: adminContactNotificationEmail(name, email, message),
       replyTo: email,
