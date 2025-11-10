@@ -36,6 +36,7 @@ const handleContact = async (req, res) => {
       to: 'contact@africaaccesswater.org',
       subject: `Website Contact Submission : ${name}`,
       html: adminContactNotificationEmail(name, email, message),
+      replyTo: email,
     });
 
     // Send confirmation to user
