@@ -7,14 +7,26 @@ class Donor {
   }
 
   static async findByEmail(email) {
-    return knex('donors').where({ email }).first();
+    // Case-insensitive email search
+    return knex('donors')
+      .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
+      .first();
   }
 
   static async findById(id) {
     return knex('donors').where({ id }).first();
   }
 
+  static async findByStripeCustomerId(stripeCustomerId) {
+    return knex('donors').where({ stripe_customer_id: stripeCustomerId }).first();
+  }
+
   static async create(data) {
+    // Convert email to lowercase before storing
+    if (data.email) {
+      data.email = data.email.toLowerCase();
+    }
+    
     // Use .returning('id') for Postgres; for SQLite it will just return the inserted id
     if (knex.client.config.client === 'pg') {
       const [result] = await knex('donors').insert(data).returning('id');
