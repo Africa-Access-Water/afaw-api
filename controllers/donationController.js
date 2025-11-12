@@ -28,16 +28,21 @@ async function handleDonationSuccess(session) {
       sessionId: session.id,
       donorEmail,
       donorName,
+      donationId,
       amount,
       currency,
       projectId,
     });
 
     // ✅ Update DB (mark donation as completed, update totals)
-    await knex("donations").where({ stripe_checkout_session_id: session.id }).update({
-      status: "completed",
-      stripe_payment_intent: session.payment_intent,
-    });
+    // For recurring donations, the session.id starts with "recurring-" and the donation is already created
+    // For one-time donations, we update by stripe_checkout_session_id
+    if (!session.id.startsWith("recurring-")) {
+      await knex("donations").where({ stripe_checkout_session_id: session.id }).update({
+        status: "completed",
+        stripe_payment_intent: session.payment_intent,
+      });
+    }
 
     let project;
     if (projectId) {
@@ -188,7 +193,7 @@ exports.createCheckoutSession = async (req, res) => {
     }
 
     // Create Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
+    const sessionConfig = {
       customer: customer.id,
       payment_method_types: ["card"],
       mode: recurring ? "subscription" : "payment",
@@ -205,13 +210,6 @@ exports.createCheckoutSession = async (req, res) => {
           quantity: 1,
         },
       ],
-      payment_intent_data: {
-        metadata: {
-          donationId,
-          projectId: project_id,
-          donorId
-        },
-      },
       metadata: {
         projectId: project_id,
         donationId: donationId,
@@ -219,7 +217,20 @@ exports.createCheckoutSession = async (req, res) => {
       },
       success_url: `${config.clientUrl}/donation/success?session_id={CHECKOUT_SESSION_ID}&project_id=${project_id}`,
       cancel_url: `${config.clientUrl}/donation/failure`,
-    });
+    };
+
+    // Only add payment_intent_data for one-time payments (not subscriptions)
+    if (!recurring) {
+      sessionConfig.payment_intent_data = {
+        metadata: {
+          donationId,
+          projectId: project_id,
+          donorId
+        },
+      };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionConfig);
 
      // Update record with checkout_session_id
      if (recurring) {
@@ -245,6 +256,7 @@ exports.createCheckoutSession = async (req, res) => {
 exports.createSubscription = async (req, res) => {
   req.body.recurring = true;
   req.body.interval = req.body.interval || "month";
+  console.log("Creating subscription with body:", req.body);
   return exports.createCheckoutSession(req, res);
 };
 
@@ -270,23 +282,101 @@ exports.stripeWebhookHandler = async (req, res) => {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object;
+        console.log(`📥 checkout.session.completed - Mode: ${session.mode}, Session ID: ${session.id}`);
 
-        if (session.mode === "subscription") {
-          const stripeSubscription = await stripe.subscriptions.retrieve(
-            session.subscription
-          );
-          await Subscription.updateBySessionId(session.id, {
-            stripe_subscription_id: stripeSubscription.id,
-            status: "active",
-          });
-        } else if (session.mode === "payment") {
-          await Donation.updateBySessionId(session.id, {
-            stripe_payment_intent: session.payment_intent,
-            status: "completed",
-          });
-          console.log("Donation Success");
-          // ✅ Call donation success handler
-          await handleDonationSuccess(session);
+        try {
+          if (session.mode === "subscription") {
+            const stripeSubscription = await stripe.subscriptions.retrieve(
+              session.subscription
+            );
+            
+            // Get current_period_end from the subscription items (it's nested!)
+            const currentPeriodEnd = stripeSubscription.current_period_end || 
+                                    stripeSubscription.items?.data?.[0]?.current_period_end;
+            
+            console.log(`📊 Subscription data - current_period_end: ${currentPeriodEnd}, status: ${stripeSubscription.status}`);
+            
+            // Validate current_period_end exists
+            if (!currentPeriodEnd) {
+              console.error(`❌ No current_period_end found in subscription: ${JSON.stringify(stripeSubscription)}`);
+              throw new Error("Subscription missing current_period_end");
+            }
+            
+            // Calculate next billing date from the subscription (Unix timestamp to JS Date)
+            const nextBillingDate = new Date(currentPeriodEnd * 1000);
+            
+            console.log(`📅 Next billing date calculated: ${nextBillingDate.toISOString()}`);
+            
+            // Update subscription in database
+            const updateCount = await knex('subscriptions')
+              .where({ stripe_checkout_session_id: session.id })
+              .update({
+                stripe_subscription_id: stripeSubscription.id,
+                status: "active",
+                next_billing_date: nextBillingDate
+              });
+            
+            console.log(`📝 Update result: ${updateCount} row(s) updated`);
+            
+            if (updateCount === 0) {
+              console.error(`❌ Failed to find subscription with session ID: ${session.id}`);
+            } else {
+              console.log(`✅ Subscription activated with next billing date: ${nextBillingDate.toISOString()}`);
+              
+              // ✅ Create first donation record for the initial subscription payment
+              const subscription = await Subscription.findBySessionId(session.id);
+              if (subscription) {
+                console.log(`💰 Creating first donation record for subscription #${subscription.id}`);
+                
+                const donationData = {
+                  donor_id: subscription.donor_id,
+                  amount: subscription.amount,
+                  currency: subscription.currency,
+                  status: "completed",
+                  interval: subscription.interval,
+                  stripe_subscription_id: stripeSubscription.id,
+                  project_id: subscription.project_id
+                };
+                
+                const donationId = await Donation.create(donationData);
+                console.log(`✅ Created first donation record #${donationId}`);
+                
+                // ❌ DON'T update project totals here - handleDonationSuccess does it!
+                // Project totals will be updated by handleDonationSuccess() below
+                
+                // Send confirmation email for first payment
+                const mockSession = {
+                  id: `recurring-${donationId}`,
+                  customer_details: {
+                    email: subscription.donor_email,
+                    name: subscription.donor_name
+                  },
+                  amount_total: Math.round(parseFloat(subscription.amount) * 100),
+                  currency: subscription.currency,
+                  payment_intent: session.payment_intent || `sub_${stripeSubscription.id}`,
+                  metadata: {
+                    projectId: subscription.project_id,
+                    donationId: donationId
+                  }
+                };
+                
+                await handleDonationSuccess(mockSession);
+                console.log(`✅ First payment confirmation email sent`);
+              }
+            }
+          } else if (session.mode === "payment") {
+            await Donation.updateBySessionId(session.id, {
+              stripe_payment_intent: session.payment_intent,
+              status: "completed",
+            });
+            console.log("Donation Success");
+            // ✅ Call donation success handler
+            await handleDonationSuccess(session);
+          }
+        } catch (error) {
+          console.error(`❌ Error in checkout.session.completed: ${error.message}`);
+          console.error(error.stack);
+          throw error;
         }
         break;
       }
@@ -315,54 +405,79 @@ exports.stripeWebhookHandler = async (req, res) => {
 
       case "invoice.payment_succeeded": {
         const invoice = event.data.object;
-        console.log(`🔄 Recurring payment succeeded for subscription: ${invoice.subscription}`);
+        console.log(`📥 invoice.payment_succeeded - Subscription: ${invoice.subscription}, Invoice: ${invoice.id}`);
         
-        // Find the subscription in our database
-        const subscription = await Subscription.findByStripeId(invoice.subscription);
-        if (!subscription) {
-          console.error(`❌ Subscription not found: ${invoice.subscription}`);
+        // Skip if this is not a subscription invoice (one-time payments don't have subscription)
+        if (!invoice.subscription) {
+          console.log(`ℹ️  Skipping - This is a one-time payment, not a subscription`);
           break;
         }
         
-        // Create a new donation record for this recurring payment
-        const donationData = {
-          donor_id: subscription.donor_id,
-          amount: (invoice.amount_paid / 100).toFixed(2),
-          currency: invoice.currency,
-          status: "completed",
-          interval: subscription.interval,
-          stripe_payment_intent: invoice.payment_intent,
-          stripe_subscription_id: invoice.subscription,
-          project_id: subscription.project_id
-        };
-        
-        const donationId = await Donation.create(donationData);
-        console.log(`✅ Created donation record ${donationId} for recurring payment`);
-        
-        // Update project totals
-        if (subscription.project_id) {
-          await Project.addDonation(subscription.project_id, parseFloat(donationData.amount));
-          console.log(`📊 Updated project ${subscription.project_id} with donation ${donationData.amount}`);
-        }
-        
-        // Reuse existing email functionality by creating a mock session object
-        const mockSession = {
-          id: `recurring-${donationId}`,
-          customer_details: {
-            email: subscription.donor_email,
-            name: subscription.donor_name
-          },
-          amount_total: invoice.amount_paid,
-          currency: invoice.currency,
-          payment_intent: invoice.payment_intent,
-          metadata: {
-            projectId: subscription.project_id
+        try {
+          // Find the subscription in our database
+          const subscription = await Subscription.findByStripeId(invoice.subscription);
+          if (!subscription) {
+            console.error(`❌ Subscription not found in database: ${invoice.subscription}`);
+            console.log(`ℹ️ This might be the first payment - checking if subscription was just created...`);
+            break;
           }
-        };
-        
-        // Reuse the existing handleDonationSuccess function
-        await handleDonationSuccess(mockSession);
-        console.log(`✅ Recurring payment processed successfully`);
+          
+          console.log(`✅ Found subscription #${subscription.id} for donor #${subscription.donor_id}`);
+          
+          // Create a new donation record for this recurring payment
+          const donationData = {
+            donor_id: subscription.donor_id,
+            amount: (invoice.amount_paid / 100).toFixed(2),
+            currency: invoice.currency,
+            status: "completed",
+            interval: subscription.interval,
+            stripe_payment_intent: invoice.payment_intent,
+            stripe_subscription_id: invoice.subscription,
+            project_id: subscription.project_id
+          };
+          
+          console.log(`💰 Creating donation record with amount: ${donationData.amount} ${donationData.currency}`);
+          const donationId = await Donation.create(donationData);
+          console.log(`✅ Created donation record #${donationId} for recurring payment`);
+          
+          // Update project totals
+          if (subscription.project_id) {
+            await Project.addDonation(subscription.project_id, parseFloat(donationData.amount));
+            console.log(`📊 Updated project ${subscription.project_id} with donation ${donationData.amount}`);
+          }
+          
+          // Update subscription next_billing_date and ensure status is 'active'
+          const nextBillingDate = new Date(invoice.lines.data[0].period.end * 1000);
+          await Subscription.updateById(subscription.id, { 
+            status: "active",
+            next_billing_date: nextBillingDate
+          });
+          console.log(`📅 Updated subscription ${subscription.id} next_billing_date to ${nextBillingDate.toISOString()}`);
+          
+          // Reuse existing email functionality by creating a mock session object
+          const mockSession = {
+            id: `recurring-${donationId}`,
+            customer_details: {
+              email: subscription.donor_email,
+              name: subscription.donor_name
+            },
+            amount_total: invoice.amount_paid,
+            currency: invoice.currency,
+            payment_intent: invoice.payment_intent,
+            metadata: {
+              projectId: subscription.project_id,
+              donationId: donationId
+            }
+          };
+          
+          // Reuse the existing handleDonationSuccess function
+          await handleDonationSuccess(mockSession);
+          console.log(`✅ Recurring payment processed successfully`);
+        } catch (error) {
+          console.error(`❌ Error in invoice.payment_succeeded: ${error.message}`);
+          console.error(error.stack);
+          throw error;
+        }
         
         break;
       }
@@ -468,6 +583,90 @@ exports.stripeWebhookHandler = async (req, res) => {
           
           await sendMail(emailOptions);
           console.log(`✅ Payment failure notification sent to ${subscription.donor_email}`);
+        }
+        
+        break;
+      }
+
+      case "customer.subscription.deleted": {
+        const stripeSubscription = event.data.object;
+        console.log(`🔔 Subscription deleted event received for: ${stripeSubscription.id}`);
+        
+        // Find the subscription in our database
+        const subscription = await Subscription.findByStripeId(stripeSubscription.id);
+        if (!subscription) {
+          console.error(`❌ Subscription not found in database: ${stripeSubscription.id}`);
+          break;
+        }
+        
+        // Update subscription status to 'cancelled'
+        await Subscription.updateById(subscription.id, { status: "cancelled" });
+        console.log(`✅ Updated subscription ${subscription.id} status to 'cancelled'`);
+        
+        // Send notification email to donor about subscription cancellation
+        if (subscription.donor_email) {
+          console.log(`📧 Sending subscription cancellation notification to: ${subscription.donor_email}`);
+          
+          const emailOptions = {
+            from: `"Africa Access Water" <${config.email.user}>`,
+            to: subscription.donor_email,
+            subject: "Your Recurring Donation Has Been Cancelled",
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #3498db;">Subscription Cancelled</h2>
+                <p>Dear ${subscription.donor_name || 'Valued Donor'},</p>
+                <p>This is to confirm that your recurring donation subscription has been cancelled.</p>
+                <p><strong>Subscription Details:</strong></p>
+                <ul>
+                  <li><strong>Amount:</strong> ${subscription.currency.toUpperCase()} ${subscription.amount}</li>
+                  <li><strong>Frequency:</strong> ${subscription.interval}ly</li>
+                  <li><strong>Status:</strong> Cancelled</li>
+                </ul>
+                <p>Your previous donations have made a real difference in bringing clean water to communities in need. Thank you for your past support!</p>
+                <p><strong>Want to continue supporting our mission?</strong></p>
+                <ul>
+                  <li>Set up a new recurring donation</li>
+                  <li>Make a one-time donation</li>
+                  <li>Explore other ways to get involved</li>
+                </ul>
+                <p>If you cancelled by mistake or have any questions, please don't hesitate to contact us.</p>
+                <p>With gratitude,<br>Africa Access Water Team</p>
+              </div>
+            `
+          };
+          
+          await sendMail(emailOptions);
+          console.log(`✅ Subscription cancellation notification sent to ${subscription.donor_email}`);
+        }
+        
+        // Notify admins about the cancellation
+        if (config.adminEmails && config.adminEmails.length > 0) {
+          console.log(`📧 Notifying admins about subscription cancellation`);
+          
+          const adminEmailOptions = {
+            from: `"Africa Access Water" <${config.email.user}>`,
+            to: config.adminEmails,
+            subject: `Subscription Cancelled - ${subscription.donor_name || 'Unknown Donor'}`,
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #e74c3c;">Subscription Cancelled</h2>
+                <p>A recurring donation subscription has been cancelled.</p>
+                <p><strong>Donor Details:</strong></p>
+                <ul>
+                  <li><strong>Name:</strong> ${subscription.donor_name || 'Unknown'}</li>
+                  <li><strong>Email:</strong> ${subscription.donor_email || 'Unknown'}</li>
+                  <li><strong>Amount:</strong> ${subscription.currency.toUpperCase()} ${subscription.amount}</li>
+                  <li><strong>Frequency:</strong> ${subscription.interval}ly</li>
+                  <li><strong>Subscription ID:</strong> ${subscription.id}</li>
+                  <li><strong>Stripe Subscription ID:</strong> ${stripeSubscription.id}</li>
+                </ul>
+                <p>Consider reaching out to understand why they cancelled and how we can improve donor retention.</p>
+              </div>
+            `
+          };
+          
+          await sendMail(adminEmailOptions);
+          console.log(`✅ Admin notification sent about subscription cancellation`);
         }
         
         break;

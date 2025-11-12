@@ -166,7 +166,7 @@ function donorDonationConfirmationEmail(name, amount, currency, projectName) {
              style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" 
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" 
                  alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
@@ -203,7 +203,7 @@ function adminDonationNotificationEmail(name, email, amount, currency, projectNa
              style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" 
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" 
                  alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
