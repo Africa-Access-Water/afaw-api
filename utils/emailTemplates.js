@@ -10,7 +10,7 @@ function userContactConfirmationEmail(name) {
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>
@@ -72,7 +72,7 @@ function passwordResetEmail(name, resetUrl) {
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>
@@ -131,7 +131,7 @@ function adminContactNotificationEmail(name, email, message) {
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>
@@ -259,7 +259,7 @@ function subscriptionAmountUpdatedEmail(donorName, oldAmount, newAmount, currenc
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>
@@ -315,7 +315,7 @@ function adminSubscriptionAmountUpdatedEmail(donorName, donorEmail, oldAmount, n
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>
@@ -362,7 +362,7 @@ function subscriptionCancelledEmail(donorName, amount, currency, interval) {
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>
@@ -422,7 +422,7 @@ function adminSubscriptionCancelledEmail(donorName, donorEmail, amount, currency
       <table align="center" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff; padding: 20px; border-radius: 8px;">
         <tr>
           <td align="center" style="padding-bottom: 20px;">
-            <img src="https://africaaccesswater.org/assets/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
+            <img src="https://africaaccesswater.org/img/afaw-logo-africa.png" alt="Africa Access Water Logo" width="150" />
           </td>
         </tr>
         <tr>

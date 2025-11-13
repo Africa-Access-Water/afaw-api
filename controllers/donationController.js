@@ -51,6 +51,11 @@ const knex = require("../config/db");
  * @param {number} session.amount_total - Amount in cents
  * @param {string} session.currency - Currency code (e.g., 'usd')
  * @param {Object} session.metadata - Additional metadata (projectId, donationId)
+ * 
+ * NOTE: stripe_payment_intent column stores different identifiers based on donation type:
+ * - One-time donations: payment_intent ID (pi_xxxxx) - from Stripe Payment Intent
+ * - Subscription donations: invoice ID (in_xxxxx) - from Stripe Invoice
+ * Both are valid, unique, and searchable transaction references in Stripe Dashboard.
  */
 async function handleDonationSuccess(session) {
   try {
@@ -79,7 +84,7 @@ async function handleDonationSuccess(session) {
     if (!isRecurring) {
       await Donation.updateBySessionId(session.id, {
         status: "completed",
-        stripe_payment_intent: session.payment_intent,
+        stripe_payment_intent: session.payment_intent,  // For one-time: payment_intent (pi_xxxxx)
       });
     }
 
@@ -374,9 +379,12 @@ exports.stripeWebhookHandler = async (req, res) => {
         try {
           // Handle subscription creation (recurring donations)
           if (session.mode === "subscription") {
-            // Retrieve full subscription details from Stripe
+            // Retrieve full subscription details from Stripe with expanded invoice and charge
             const stripeSubscription = await stripe.subscriptions.retrieve(
-              session.subscription
+              session.subscription,
+              {
+                expand: ['latest_invoice.payment_intent', 'latest_invoice.charge']
+              }
             );
             
             // Extract next billing date from subscription
@@ -417,6 +425,33 @@ exports.stripeWebhookHandler = async (req, res) => {
               if (subscription) {
                 console.log(`💰 Creating first donation record for subscription #${subscription.id}`);
                 
+                // =================================================================
+                // GET TRANSACTION REFERENCE FOR FIRST SUBSCRIPTION PAYMENT
+                // =================================================================
+                // For subscriptions, we use the invoice ID (in_xxxxx) as the transaction reference
+                // because it's always available and uniquely identifies the payment in Stripe.
+                // 
+                // Why invoice ID instead of payment_intent/charge?
+                // - Invoices are the primary billing document for subscriptions
+                // - payment_intent/charge may not exist in test mode or with test clocks
+                // - Invoice ID is consistent across all scenarios (production/test/test clock)
+                // - Fully searchable and traceable in Stripe Dashboard
+                // =================================================================
+                let paymentIntentId = null;
+                
+                if (stripeSubscription.latest_invoice) {
+                  // Extract invoice ID (latest_invoice can be either a string ID or expanded object)
+                  paymentIntentId = typeof stripeSubscription.latest_invoice === 'string' 
+                    ? stripeSubscription.latest_invoice 
+                    : stripeSubscription.latest_invoice.id;
+                  console.log(`📄 Transaction ID for first payment: ${paymentIntentId}`);
+                } else {
+                  // Rare edge case: No invoice found, use subscription ID as fallback
+                  console.warn(`⚠️ No latest_invoice found on subscription`);
+                  paymentIntentId = `sub_payment_${stripeSubscription.id}`;
+                  console.log(`⚠️ Using subscription-based ID: ${paymentIntentId}`);
+                }
+                
                 // Prepare donation data for first payment
                 const donationData = {
                   donor_id: subscription.donor_id,
@@ -424,6 +459,7 @@ exports.stripeWebhookHandler = async (req, res) => {
                   currency: subscription.currency,
                   status: "completed",
                   interval: subscription.interval,
+                  stripe_payment_intent: paymentIntentId,  // Stores invoice ID (in_xxxxx) for subscriptions
                   stripe_subscription_id: stripeSubscription.id,
                   project_id: subscription.project_id
                 };
@@ -449,7 +485,7 @@ exports.stripeWebhookHandler = async (req, res) => {
                   },
                   amount_total: Math.round(parseFloat(subscription.amount) * 100), // Convert to cents
                   currency: subscription.currency,
-                  payment_intent: session.payment_intent || `sub_${stripeSubscription.id}`,
+                  payment_intent: paymentIntentId,  // Invoice ID (in_xxxxx) for subscription
                   metadata: {
                     projectId: subscription.project_id,
                     donationId: donationId
@@ -518,7 +554,7 @@ exports.stripeWebhookHandler = async (req, res) => {
       // IMPORTANT: Skips first invoice to avoid duplicates (handled by checkout.session.completed)
       // ----------------------------------------------------------------
       case "invoice.payment_succeeded": {
-        let invoice = event.data.object;
+        const invoice = event.data.object;
         
         console.log(`📥 invoice.payment_succeeded - Invoice: ${invoice.id}`);
         
@@ -569,6 +605,20 @@ exports.stripeWebhookHandler = async (req, res) => {
             break;
           }
           
+          // =================================================================
+          // GET TRANSACTION REFERENCE FOR RECURRING SUBSCRIPTION PAYMENT
+          // =================================================================
+          // For recurring payments, we use the invoice ID (in_xxxxx) from the
+          // invoice.payment_succeeded webhook event as the transaction reference.
+          // 
+          // Why invoice ID?
+          // - Each billing cycle creates a new unique invoice
+          // - Consistent with first payment approach (both use invoice IDs)
+          // - Works reliably in production, test mode, and with test clocks
+          // - Allows easy lookup in Stripe Dashboard for payment verification
+          // =================================================================
+          const paymentIntentId = invoice.id;
+          
           // Create new donation record for this recurring payment
           const donationData = {
             donor_id: subscription.donor_id,
@@ -576,13 +626,13 @@ exports.stripeWebhookHandler = async (req, res) => {
             currency: invoice.currency,
             status: "completed",
             interval: subscription.interval,
-            stripe_payment_intent: invoice.payment_intent,
+            stripe_payment_intent: paymentIntentId,  // Stores invoice ID (in_xxxxx) for subscriptions
             stripe_subscription_id: subscriptionId,
             project_id: subscription.project_id
           };
           
           const donationId = await Donation.create(donationData);
-          console.log(`✅ Recurring payment: $${donationData.amount} - Donation #${donationId}`);
+          console.log(`✅ Recurring payment: $${donationData.amount} - Donation #${donationId} - Invoice: ${paymentIntentId}`);
           
           // Update project funding total with new payment
           if (subscription.project_id) {
@@ -605,7 +655,7 @@ exports.stripeWebhookHandler = async (req, res) => {
             },
             amount_total: invoice.amount_paid, // Already in cents from Stripe
             currency: invoice.currency,
-            payment_intent: invoice.payment_intent,
+            payment_intent: paymentIntentId,  // Invoice ID (in_xxxxx) for subscription
             metadata: {
               projectId: subscription.project_id,
               donationId: donationId
