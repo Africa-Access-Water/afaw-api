@@ -2,6 +2,7 @@ const { cloudinary, teamMediaStorage } = require("../utils/cloudinary");
 const multer = require("multer");
 const upload = multer({ storage: teamMediaStorage });
 const db = require("../config/db"); // your Knex instance
+const { getAllHandler, getByIdHandler, deleteHandler } = require("../utils/crudHelpers");
 
 // CREATE
 const createTeam = async (req, res) => {
@@ -30,30 +31,10 @@ const createTeam = async (req, res) => {
 };
 
 // READ ALL
-const getTeams = async (req, res) => {
-  try {
-    const members = await db("teams").orderBy("created_at", "desc");
-    res.json(members);
-  } catch (err) {
-    console.error("Error fetching team members:", err);
-    res.status(500).json({ error: "Failed to fetch team members" });
-  }
-};
+const getTeams = getAllHandler(db, "teams", "team members");
 
 // READ ONE
-const getTeamById = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const member = await db("teams").where({ id }).first();
-
-    if (!member) return res.status(404).json({ error: "Team member not found" });
-
-    res.json(member);
-  } catch (err) {
-    console.error("Error fetching team member:", err);
-    res.status(500).json({ error: "Failed to fetch team member" });
-  }
-};
+const getTeamById = getByIdHandler(db, "teams", "Team member");
 
 // UPDATE
 const updateTeam = async (req, res) => {
@@ -88,19 +69,7 @@ const updateTeam = async (req, res) => {
 };
 
 // DELETE
-const deleteTeam = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const deleted = await db("teams").where({ id }).del();
-
-    if (!deleted) return res.status(404).json({ error: "Team member not found" });
-
-    res.json({ message: "Team member deleted successfully" });
-  } catch (err) {
-    console.error("Error deleting team member:", err);
-    res.status(500).json({ error: "Failed to delete team member" });
-  }
-};
+const deleteTeam = deleteHandler(db, "teams", "Team member");
 
 module.exports = {
   createTeam,
