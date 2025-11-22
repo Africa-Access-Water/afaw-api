@@ -32,6 +32,8 @@ const {
   adminSubscriptionAmountUpdatedEmail,
   subscriptionCancelledEmail,
   adminSubscriptionCancelledEmail,
+  donorRefundConfirmationEmail,
+  adminRefundNotificationEmail,
 } = require("../utils/emailTemplates");
 const { generateDonationReceiptPDFBuffer } = require("./pdfController");
 const knex = require("../config/db");
@@ -936,6 +938,119 @@ exports.stripeWebhookHandler = async (req, res) => {
           
           await sendMail(adminEmailOptions);
           console.log(`✅ Admin notification sent about subscription cancellation`);
+        }
+        
+        break;
+      }
+
+      // ----------------------------------------------------------------
+      // EVENT: charge.refunded
+      // Triggered when a charge is refunded (full or partial)
+      // Updates donation status and adjusts project totals
+      // No partial refunds workflow implemented yet. Only full refunds.
+      // ----------------------------------------------------------------
+      case "charge.refunded": {
+        const charge = event.data.object;
+        console.log(`💸 Refund processed for charge: ${charge.id}`);
+        
+        try {
+          const originalAmount = (charge.amount / 100).toFixed(2); // Convert cents to dollars
+          const refundedAmount = (charge.amount_refunded / 100).toFixed(2);
+          const paymentIntentId = charge.payment_intent;
+          const currency = charge.currency;
+          const chargeId = charge.id;
+          
+          // Look up donation by payment intent or charge ID
+          let donation = await Donation.findByPaymentIntent(paymentIntentId);
+          
+          // For Subscriptions: Try to find by Invoice ID if payment intent lookup fails 
+          if (!donation && paymentIntentId) {
+              const invoicePayments = await stripe.invoicePayments.list({
+              'payment[type]': 'payment_intent',
+              'payment[payment_intent]': paymentIntentId,
+              });
+
+              const invoiceId = invoicePayments.data[0]?.invoice; // "in_1SW5RuF..."
+              if (invoiceId) {
+                donation = await Donation.findByPaymentIntent(invoiceId);
+              
+              }
+          } 
+          if (!donation) {
+            console.error(`❌ Donation not found for invoice: ${invoiceId}, payment_intent: ${paymentIntentId}`);
+            break;
+          }
+          
+          console.log(`📝 Found donation #${donation.id} - Original amount: ${donation.amount}, Status: ${donation.status}`);
+
+          // Update donation record with refund information
+          const updateData = {
+            status: "refunded",
+          };
+          
+          await Donation.updateById(donation.id, updateData);
+          console.log(`✅ Updated donation #${donation.id} status to 'refunded'`);
+          
+          // Deduct refunded amount from project total (if donation was linked to a project)
+          if (donation.project_id) {
+            // Use negative value to subtract from project total
+            await Project.addDonation(donation.project_id, -refundedAmount);
+            console.log(`📌 Project #${donation.project_id} Amount reduced by ${currency} ${refundedAmount}`);
+          }
+          
+          // Fetch donor information for notifications
+          const donor = await Donor.findById(donation.donor_id);
+          
+          // Send refund confirmation email to donor
+          if (donor && donor.email) {
+            console.log(`📧 Sending refund confirmation to: ${donor.email}`);
+            
+            const refundEmailOptions = {
+              from: `"Africa Access Water" <${config.email.user}>`,
+              to: donor.email,
+              subject: `Refund Processed - ${currency.toUpperCase()} ${refundedAmount}`,
+              html: donorRefundConfirmationEmail(
+                donor.name,
+                refundedAmount,
+                originalAmount,
+                currency,
+                chargeId,
+              )
+            };
+            
+            await sendMail(refundEmailOptions);
+            console.log(`✅ Refund confirmation email sent to ${donor.email}`);
+          }
+          
+          // Notify admins about the refund
+          if (config.adminEmails && config.adminEmails.length > 0) {
+            console.log(`📧 Notifying admins about refund`);
+            
+            const adminRefundEmailOptions = {
+              from: `"Africa Access Water" <${config.email.user}>`,
+              to: config.adminEmails,
+              subject: `Refund Processed - ${donor ? donor.name : 'Unknown Donor'}`,
+              html: adminRefundNotificationEmail(
+                donor ? donor.name : null,
+                donor ? donor.email : null,
+                refundedAmount,
+                originalAmount,
+                currency,
+                donation.id,
+                charge.id,
+                paymentIntentId,
+                donation.project_id
+              )
+            };
+            
+            await sendMail(adminRefundEmailOptions);
+            console.log(`✅ Admin refund notification sent`);
+          }
+          
+        } catch (error) {
+          console.error(`❌ Error processing refund: ${error.message}`);
+          console.error(error.stack);
+          throw error;
         }
         
         break;

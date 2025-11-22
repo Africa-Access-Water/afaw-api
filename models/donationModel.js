@@ -57,6 +57,13 @@ class Donation {
       .update(data);
     return knex('donations').where({ stripe_checkout_session_id: sessionId }).first();
   }
+
+  // ✅ New: find donation by Stripe payment intent ID
+  static async findByPaymentIntent(paymentIntentId) {
+    return knex('donations')
+      .where({ stripe_payment_intent: paymentIntentId })
+      .first();
+  }
 }
 
 module.exports = Donation;
