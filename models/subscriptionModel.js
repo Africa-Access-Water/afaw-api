@@ -52,6 +52,36 @@ class Subscription {
       .first();
   }
 
+  // ✅ New: find by Stripe checkout session ID (with donor info)
+  static async findBySessionId(sessionId) {
+    return knex('subscriptions')
+      .leftJoin('donors', 'subscriptions.donor_id', 'donors.id')
+      .select(
+        'subscriptions.*',
+        'donors.email as donor_email',
+        'donors.name as donor_name'
+      )
+      .where({ 'subscriptions.stripe_checkout_session_id': sessionId })
+      .first();
+  }
+
+  // ✅ New: update by Stripe subscription ID
+  static async updateByStripeId(stripeSubscriptionId, data) {
+    await knex('subscriptions')
+      .where({ stripe_subscription_id: stripeSubscriptionId })
+      .update(data);
+    return knex('subscriptions')
+      .where({ stripe_subscription_id: stripeSubscriptionId })
+      .first();
+  }
+
+  // ✅ New: find active subscription by donor ID
+  static async findActiveByDonorId(donorId) {
+    return knex('subscriptions')
+      .where({ donor_id: donorId, status: 'active' })
+      .first();
+  }
+
   static async delete(id) {
     return knex('subscriptions').where({ id }).del();
   }

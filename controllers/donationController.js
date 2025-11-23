@@ -1,4 +1,23 @@
-// controllers/donationController.js
+/**
+ * ============================================================================
+ * DONATION CONTROLLER
+ * ============================================================================
+ * 
+ * Handles all donation-related operations including:
+ * - One-time donations via Stripe Checkout
+ * - Recurring subscriptions (daily, weekly, monthly, yearly)
+ * - Stripe webhook events (payment success, failure, subscription changes)
+ * - Email notifications to donors and admins
+ * - PDF receipt generation
+ * - Project donation total tracking
+ * 
+ * @module controllers/donationController
+ */
+
+// ============================================================================
+// DEPENDENCIES
+// ============================================================================
+
 const Donor = require("../models/donorModel");
 const Donation = require("../models/donationModel");
 const Subscription = require("../models/subscriptionModel");
@@ -9,12 +28,37 @@ const { sendMail } = require("../services/mailService");
 const {
   donorDonationConfirmationEmail,
   adminDonationNotificationEmail,
+  subscriptionAmountUpdatedEmail,
+  adminSubscriptionAmountUpdatedEmail,
+  subscriptionCancelledEmail,
+  adminSubscriptionCancelledEmail,
+  donorRefundConfirmationEmail,
+  adminRefundNotificationEmail,
 } = require("../utils/emailTemplates");
 const { generateDonationReceiptPDFBuffer } = require("./pdfController");
-
-
 const knex = require("../config/db");
 
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Handle successful donation/subscription payment
+ * Called after payment is completed in Stripe
+ * Sends confirmation emails and PDF receipts to donors and admins
+ * 
+ * @param {Object} session - Stripe session or mock session object
+ * @param {string} session.id - Session ID (starts with "recurring-" for recurring payments)
+ * @param {Object} session.customer_details - Customer information
+ * @param {number} session.amount_total - Amount in cents
+ * @param {string} session.currency - Currency code (e.g., 'usd')
+ * @param {Object} session.metadata - Additional metadata (projectId, donationId)
+ * 
+ * NOTE: stripe_payment_intent column stores different identifiers based on donation type:
+ * - One-time donations: payment_intent ID (pi_xxxxx) - from Stripe Payment Intent
+ * - Subscription donations: invoice ID (in_xxxxx) - from Stripe Invoice
+ * Both are valid, unique, and searchable transaction references in Stripe Dashboard.
+ */
 async function handleDonationSuccess(session) {
   try {
     const donorEmail = session.customer_details?.email;
@@ -28,36 +72,39 @@ async function handleDonationSuccess(session) {
       sessionId: session.id,
       donorEmail,
       donorName,
+      donationId,
       amount,
       currency,
       projectId,
     });
 
-    // ✅ Update DB (mark donation as completed, update totals)
-    await knex("donations").where({ stripe_checkout_session_id: session.id }).update({
-      status: "completed",
-      stripe_payment_intent: session.payment_intent,
-    });
-
-    let project;
-    if (projectId) {
-      await knex("projects")
-        .where({ id: projectId })
-        .increment("donation_raised", amount);
-
-      // Fetch project details for logging
-      project = await knex("projects").where({ id: projectId }).first();
-      console.log("📌 Project updated:", project);
+    // Determine if this is a recurring donation (session ID starts with "recurring-")
+    const isRecurring = session.id.startsWith("recurring-");
+    
+    // Update donation status in database (one-time donations only)
+    // Recurring donations are already created with status='completed'
+    if (!isRecurring) {
+      await Donation.updateBySessionId(session.id, {
+        status: "completed",
+        stripe_payment_intent: session.payment_intent,  // For one-time: payment_intent (pi_xxxxx)
+      });
     }
 
-     // ✅ Send confirmation email to donor
+    // Update project donation totals (one-time donations only)
+    // Recurring donations update project totals in their respective webhook handlers
+    let project = null;
+    if (projectId && !isRecurring) {
+      project = await Project.addDonation(projectId, amount);
+      console.log("📌 Project updated:", project);
+    } else if (projectId) {
+      project = await Project.findById(projectId);
+    }
+
+     // Send confirmation email to donor with PDF receipt
      if (donorEmail) {
        console.log(`📧 Sending confirmation email to donor: ${donorEmail}`);
-       const project = projectId
-         ? await knex("projects").where({ id: projectId }).first()
-         : null;
 
-       // Prepare donation data for PDF generation
+       // Prepare donation data for PDF receipt generation
        const donationData = {
          id: donationId,
          name: donorName,
@@ -69,22 +116,17 @@ async function handleDonationSuccess(session) {
          message: project ? `Donation for ${project.name}` : "General donation"
        };
 
-       // Try to generate PDF receipt
-       let pdfBuffer = null;
-       try {
-         pdfBuffer = await generateDonationReceiptPDFBuffer(donationData);
+       // Generate PDF receipt (returns null if generation fails - non-blocking)
+       const pdfBuffer = await generateDonationReceiptPDFBuffer(donationData);
+       if (pdfBuffer) {
          console.log("✅ PDF receipt generated successfully");
-       } catch (pdfError) {
-         console.error("Failed to generate PDF receipt:", pdfError);
-         // Continue without PDF attachment
        }
 
-       // Send email with or without PDF attachment
+       // Prepare email with HTML content and optional PDF attachment
        const emailOptions = {
          from: `"Africa Access Water" <${config.email.user}>`,
          to: donorEmail,
-         subject: 
-           `Thank you for your donation of ${currency} ${amount}`,
+         subject: `Thank you for your donation of ${currency} ${amount}`,
          html: donorDonationConfirmationEmail(
            donorName,
            amount,
@@ -93,7 +135,7 @@ async function handleDonationSuccess(session) {
          )
        };
 
-       // Add PDF attachment only if successfully generated
+       // Attach PDF receipt if successfully generated
        if (pdfBuffer) {
          emailOptions.attachments = [
            {
@@ -109,12 +151,12 @@ async function handleDonationSuccess(session) {
        console.warn("⚠️ No donor email found in session");
      }
 
-    // // ✅ Notify admin(s)
+    // Send notification to admins
     console.log("📧 Sending admin notification to:", config.adminEmails);
-    projectName = project ? project.name : "our mission";
+    const projectName = project ? project.name : "our mission";
     await sendMail({
       from: `"Africa Access Water" <${config.email.user}>`,
-      to: config.adminEmails, // comma-separated list in .env
+      to: config.adminEmails,
       subject: `New Donation Received: ${currency} ${amount}`,
       html: adminDonationNotificationEmail(
         donorName,
@@ -131,17 +173,33 @@ async function handleDonationSuccess(session) {
   }
 }
 
+// ============================================================================
+// EXPORTED CONTROLLER FUNCTIONS
+// ============================================================================
 
 /**
- * Create Stripe Checkout Session (one-time or recurring)
+ * Create Stripe Checkout Session
+ * Handles both one-time donations and recurring subscriptions
+ * 
+ * @route POST /api/donations/create-checkout-session
+ * @access Public
+ * 
+ * @param {Object} req.body
+ * @param {string} req.body.name - Donor name
+ * @param {string} req.body.email - Donor email
+ * @param {number} req.body.project_id - Project ID to donate to
+ * @param {number} req.body.amount - Donation amount in dollars
+ * @param {string} req.body.currency - Currency code (e.g., 'usd')
+ * @param {boolean} req.body.recurring - Whether this is a recurring donation
+ * @param {string} req.body.interval - Frequency (day, week, month, year) - required if recurring
+ * 
+ * @returns {Object} { url: string } - Stripe checkout session URL
  */
-
 exports.createCheckoutSession = async (req, res) => {
   try {
-    const { name, email, project_id, amount, currency, interval, recurring } =
-      req.body;
+    const { name, email, project_id, amount, currency, interval, recurring } = req.body;
 
-    // Check or create donor
+    // Step 1: Find or create donor in database
     let donor = await Donor.findByEmail(email);
     let donorId;
 
@@ -152,23 +210,27 @@ exports.createCheckoutSession = async (req, res) => {
       donorId = donor.id;
     }
 
-    // Ensure Stripe customer exists
+    // Step 2: Create or retrieve Stripe customer
     let customer;
     if (!donor.stripe_customer_id) {
+      // Create new Stripe customer if donor doesn't have one
       customer = await stripe.customers.create({
         name: donor.name,
         email: donor.email,
       });
+      // Store Stripe customer ID in our database
+      await Donor.updateStripeCustomerId(donorId, customer.id);
     } else {
+      // Retrieve existing Stripe customer
       customer = await stripe.customers.retrieve(donor.stripe_customer_id);
     }
 
-    await Donor.updateStripeCustomerId(donorId, customer.id);
-
-    // Save donation/subscription first (status = 'initiated')
+    // Step 3: Create initial database record (status = 'initiated')
+    // This tracks the donation/subscription before payment is completed
     let donationId;
 
     if (recurring) {
+      // Create subscription record for recurring donations
       donationId = await Subscription.create({
         donor_id: donorId,
         project_id,
@@ -178,6 +240,7 @@ exports.createCheckoutSession = async (req, res) => {
         status: "initiated",
       });
     } else {
+      // Create donation record for one-time donations
       donationId = await Donation.create({
         donor_id: donorId,
         project_id,
@@ -187,11 +250,11 @@ exports.createCheckoutSession = async (req, res) => {
       });
     }
 
-    // Create Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
+    // Step 4: Configure Stripe Checkout session
+    const sessionConfig = {
       customer: customer.id,
       payment_method_types: ["card"],
-      mode: recurring ? "subscription" : "payment",
+      mode: recurring ? "subscription" : "payment", // subscription mode creates recurring payments
       line_items: [
         {
           price_data: {
@@ -199,19 +262,12 @@ exports.createCheckoutSession = async (req, res) => {
             product_data: {
               name: recurring ? "Recurring Donation" : "One-Time Donation",
             },
-            unit_amount: Math.round(amount * 100),
-            recurring: recurring ? { interval } : undefined,
+            unit_amount: Math.round(amount * 100), // Convert dollars to cents
+            recurring: recurring ? { interval } : undefined, // e.g., { interval: 'month' }
           },
           quantity: 1,
         },
       ],
-      payment_intent_data: {
-        metadata: {
-          donationId,
-          projectId: project_id,
-          donorId
-        },
-      },
       metadata: {
         projectId: project_id,
         donationId: donationId,
@@ -219,9 +275,25 @@ exports.createCheckoutSession = async (req, res) => {
       },
       success_url: `${config.clientUrl}/donation/success?session_id={CHECKOUT_SESSION_ID}&project_id=${project_id}`,
       cancel_url: `${config.clientUrl}/donation/failure`,
-    });
+    };
 
-     // Update record with checkout_session_id
+    // IMPORTANT: payment_intent_data is only for one-time payments
+    // Adding it to subscriptions will cause an error
+    if (!recurring) {
+      sessionConfig.payment_intent_data = {
+        metadata: {
+          donationId,
+          projectId: project_id,
+          donorId
+        },
+      };
+    }
+
+    // Step 5: Create Stripe checkout session
+    const session = await stripe.checkout.sessions.create(sessionConfig);
+
+     // Step 6: Update database record with Stripe session ID
+     // This links our database record to the Stripe session
      if (recurring) {
       await Subscription.updateById(donationId, {
         stripe_checkout_session_id: session.id,
@@ -231,7 +303,8 @@ exports.createCheckoutSession = async (req, res) => {
         stripe_checkout_session_id: session.id,
       });
     }
-    // Redirect
+
+    // Step 7: Return checkout URL to frontend
     return res.json({ url: session.url });
   } catch (err) {
     console.error("Checkout session error:", err);
@@ -240,18 +313,46 @@ exports.createCheckoutSession = async (req, res) => {
 };
 
 /**
- * Shortcut for recurring donations
+ * Create Recurring Subscription (Shortcut)
+ * Convenience endpoint that wraps createCheckoutSession with recurring=true
+ * 
+ * @route POST /api/donations/create-subscription
+ * @access Public
+ * 
+ * @param {Object} req.body - Same as createCheckoutSession
+ * @returns {Object} { url: string } - Stripe checkout session URL
  */
 exports.createSubscription = async (req, res) => {
   req.body.recurring = true;
-  req.body.interval = req.body.interval || "month";
+  req.body.interval = req.body.interval || "month"; // Default to monthly
+  console.log("Creating subscription with interval:", req.body.interval);
   return exports.createCheckoutSession(req, res);
 };
 
+// ============================================================================
+// STRIPE WEBHOOK HANDLER
+// ============================================================================
+
 /**
- * Webhook handler for Stripe events
+ * Stripe Webhook Handler
+ * Processes all Stripe webhook events for donations and subscriptions
+ * 
+ * @route POST /api/donations/stripe/webhook
+ * @access Stripe only (verified via signature)
+ * 
+ * Webhook Events Handled:
+ * - checkout.session.completed: Payment/subscription created successfully
+ * - checkout.session.expired: User abandoned checkout
+ * - payment_intent.payment_failed: One-time payment failed
+ * - invoice.payment_succeeded: Recurring payment succeeded
+ * - invoice.payment_failed: Recurring payment failed (with retry logic)
+ * - customer.subscription.updated: Subscription amount or status changed
+ * - customer.subscription.deleted: Subscription was cancelled
+ * 
+ * @important Webhook signature is verified to prevent unauthorized requests
  */
 exports.stripeWebhookHandler = async (req, res) => {
+  // Step 1: Verify webhook signature to ensure request is from Stripe
   const sig = req.headers["stripe-signature"];
   let event;
   
@@ -266,34 +367,166 @@ exports.stripeWebhookHandler = async (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  // Step 2: Process webhook event based on type
   try {
     switch (event.type) {
+      // ----------------------------------------------------------------
+      // EVENT: checkout.session.completed
+      // Triggered when user successfully completes payment/subscription
+      // ----------------------------------------------------------------
       case "checkout.session.completed": {
         const session = event.data.object;
+        console.log(`📥 checkout.session.completed - Mode: ${session.mode}, Session ID: ${session.id}`);
 
-        if (session.mode === "subscription") {
-          const stripeSubscription = await stripe.subscriptions.retrieve(
-            session.subscription
-          );
-          await Subscription.updateBySessionId(session.id, {
-            stripe_subscription_id: stripeSubscription.id,
-            status: "active",
-          });
-        } else if (session.mode === "payment") {
-          await Donation.updateBySessionId(session.id, {
-            stripe_payment_intent: session.payment_intent,
-            status: "completed",
-          });
-          console.log("Donation Success");
-          // ✅ Call donation success handler
-          await handleDonationSuccess(session);
+        try {
+          // Handle subscription creation (recurring donations)
+          if (session.mode === "subscription") {
+            // Retrieve full subscription details from Stripe with expanded invoice and charge
+            const stripeSubscription = await stripe.subscriptions.retrieve(
+              session.subscription,
+              {
+                expand: ['latest_invoice.payment_intent', 'latest_invoice.charge']
+              }
+            );
+            
+            // Extract next billing date from subscription
+            // (stored as Unix timestamp, needs conversion)
+            const currentPeriodEnd = stripeSubscription.current_period_end || 
+                                    stripeSubscription.items?.data?.[0]?.current_period_end;
+            
+            console.log(`📊 Subscription data - current_period_end: ${currentPeriodEnd}, status: ${stripeSubscription.status}`);
+            
+            // Validate that billing date exists (critical for recurring payments)
+            if (!currentPeriodEnd) {
+              console.error(`❌ No current_period_end found in subscription: ${JSON.stringify(stripeSubscription)}`);
+              throw new Error("Subscription missing current_period_end");
+            }
+            
+            // Convert Unix timestamp to JavaScript Date object
+            const nextBillingDate = new Date(currentPeriodEnd * 1000);
+            
+            console.log(`📅 Next billing date calculated: ${nextBillingDate.toISOString()}`);
+            
+            // Update subscription record in database with Stripe details
+            const updatedSubscription = await Subscription.updateBySessionId(session.id, {
+              stripe_subscription_id: stripeSubscription.id,
+              status: "active",
+              next_billing_date: nextBillingDate
+            });
+            
+            console.log(`📝 Update result: ${updatedSubscription ? 1 : 0} row(s) updated`);
+            
+            if (!updatedSubscription) {
+              console.error(`❌ Failed to find subscription with session ID: ${session.id}`);
+            } else {
+              console.log(`✅ Subscription activated with next billing date: ${nextBillingDate.toISOString()}`);
+              
+              // IMPORTANT: Create first donation record for initial subscription payment
+              // This handles the first payment, subsequent payments handled by invoice.payment_succeeded
+              const subscription = await Subscription.findBySessionId(session.id);
+              if (subscription) {
+                console.log(`💰 Creating first donation record for subscription #${subscription.id}`);
+                
+                // =================================================================
+                // GET TRANSACTION REFERENCE FOR FIRST SUBSCRIPTION PAYMENT
+                // =================================================================
+                // For subscriptions, we use the invoice ID (in_xxxxx) as the transaction reference
+                // because it's always available and uniquely identifies the payment in Stripe.
+                // 
+                // Why invoice ID instead of payment_intent/charge?
+                // - Invoices are the primary billing document for subscriptions
+                // - payment_intent/charge may not exist in test mode or with test clocks
+                // - Invoice ID is consistent across all scenarios (production/test/test clock)
+                // - Fully searchable and traceable in Stripe Dashboard
+                // =================================================================
+                let paymentIntentId = null;
+                
+                if (stripeSubscription.latest_invoice) {
+                  // Extract invoice ID (latest_invoice can be either a string ID or expanded object)
+                  paymentIntentId = typeof stripeSubscription.latest_invoice === 'string' 
+                    ? stripeSubscription.latest_invoice 
+                    : stripeSubscription.latest_invoice.id;
+                  console.log(`📄 Transaction ID for first payment: ${paymentIntentId}`);
+                } else {
+                  // Rare edge case: No invoice found, use subscription ID as fallback
+                  console.warn(`⚠️ No latest_invoice found on subscription`);
+                  paymentIntentId = `sub_payment_${stripeSubscription.id}`;
+                  console.log(`⚠️ Using subscription-based ID: ${paymentIntentId}`);
+                }
+                
+                // Prepare donation data for first payment
+                const donationData = {
+                  donor_id: subscription.donor_id,
+                  amount: subscription.amount,
+                  currency: subscription.currency,
+                  status: "completed",
+                  interval: subscription.interval,
+                  stripe_payment_intent: paymentIntentId,  // Stores invoice ID (in_xxxxx) for subscriptions
+                  stripe_subscription_id: stripeSubscription.id,
+                  project_id: subscription.project_id
+                };
+                
+                // Create donation record in database
+                const donationId = await Donation.create(donationData);
+                console.log(`✅ Created first donation record #${donationId}`);
+                
+                // Update project total with first payment amount
+                // This ensures project funding totals are accurate from first payment
+                if (subscription.project_id) {
+                  await Project.addDonation(subscription.project_id, parseFloat(subscription.amount));
+                  console.log(`📌 Project total updated: +$${subscription.amount}`);
+                }
+                
+                // Send confirmation email with PDF receipt for first payment
+                // We create a mock session object to match the handleDonationSuccess interface
+                const mockSession = {
+                  id: `recurring-${donationId}`, // Prefix identifies this as recurring
+                  customer_details: {
+                    email: subscription.donor_email,
+                    name: subscription.donor_name
+                  },
+                  amount_total: Math.round(parseFloat(subscription.amount) * 100), // Convert to cents
+                  currency: subscription.currency,
+                  payment_intent: paymentIntentId,  // Invoice ID (in_xxxxx) for subscription
+                  metadata: {
+                    projectId: subscription.project_id,
+                    donationId: donationId
+                  }
+                };
+                
+                await handleDonationSuccess(mockSession);
+                console.log(`✅ First payment confirmation email sent`);
+              }
+            }
+          } 
+          // Handle one-time payment completion
+          else if (session.mode === "payment") {
+            // Update donation status and link payment intent
+            await Donation.updateBySessionId(session.id, {
+              stripe_payment_intent: session.payment_intent,
+              status: "completed",
+            });
+            console.log("Donation Success");
+            
+            // Send confirmation email with PDF receipt
+            await handleDonationSuccess(session);
+          }
+        } catch (error) {
+          console.error(`❌ Error in checkout.session.completed: ${error.message}`);
+          console.error(error.stack);
+          throw error;
         }
         break;
       }
 
+      // ----------------------------------------------------------------
+      // EVENT: checkout.session.expired
+      // Triggered when user abandons checkout without completing payment
+      // ----------------------------------------------------------------
       case "checkout.session.expired": {
         const session = event.data.object;
         try {
+          // Mark both donation and subscription records as expired
           await Donation.updateBySessionId(session.id, { status: "expired" });
           await Subscription.updateBySessionId(session.id, { status: "expired" });
           console.log(`⏰ Session ${session.id} expired automatically`);
@@ -303,6 +536,10 @@ exports.stripeWebhookHandler = async (req, res) => {
         break;
       }
 
+      // ----------------------------------------------------------------
+      // EVENT: payment_intent.payment_failed
+      // Triggered when a one-time payment fails
+      // ----------------------------------------------------------------
       case "payment_intent.payment_failed": {
         const intent = event.data.object;
         const donationId = intent.metadata.donationId;
@@ -313,86 +550,165 @@ exports.stripeWebhookHandler = async (req, res) => {
         break;
       }
 
+      // ----------------------------------------------------------------
+      // EVENT: invoice.payment_succeeded
+      // Triggered when recurring subscription payment succeeds
+      // IMPORTANT: Skips first invoice to avoid duplicates (handled by checkout.session.completed)
+      // ----------------------------------------------------------------
       case "invoice.payment_succeeded": {
         const invoice = event.data.object;
-        console.log(`🔄 Recurring payment succeeded for subscription: ${invoice.subscription}`);
         
-        // Find the subscription in our database
-        const subscription = await Subscription.findByStripeId(invoice.subscription);
-        if (!subscription) {
-          console.error(`❌ Subscription not found: ${invoice.subscription}`);
+        console.log(`📥 invoice.payment_succeeded - Invoice: ${invoice.id}`);
+        
+        // Extract subscription ID from invoice (can be in multiple places)
+        let subscriptionId = typeof invoice.subscription === 'string' 
+          ? invoice.subscription 
+          : invoice.subscription?.id;
+        
+        // Fallback 1: Check line items for subscription ID
+        if (!subscriptionId && invoice.lines?.data?.[0]?.subscription) {
+          const lineSub = invoice.lines.data[0].subscription;
+          subscriptionId = typeof lineSub === 'string' ? lineSub : lineSub?.id;
+        }
+        
+        // Fallback 2: Look up subscription by customer ID if not found above
+        if (!subscriptionId && invoice.billing_reason && invoice.billing_reason.includes('subscription') && invoice.customer) {
+          try {
+            const donor = await Donor.findByStripeCustomerId(invoice.customer);
+            if (donor) {
+              const subscription = await Subscription.findActiveByDonorId(donor.id);
+              if (subscription) {
+                subscriptionId = subscription.stripe_subscription_id;
+              }
+            }
+          } catch (err) {
+            console.error(`❌ Failed to look up subscription by customer:`, err);
+          }
+        }
+        
+        // Skip if no subscription ID found (one-time payments don't have subscriptions)
+        if (!subscriptionId) {
+          console.log(`ℹ️  Skipping - This is a one-time payment, not a subscription`);
           break;
         }
         
-        // Create a new donation record for this recurring payment
-        const donationData = {
-          donor_id: subscription.donor_id,
-          amount: (invoice.amount_paid / 100).toFixed(2),
-          currency: invoice.currency,
-          status: "completed",
-          interval: subscription.interval,
-          stripe_payment_intent: invoice.payment_intent,
-          stripe_subscription_id: invoice.subscription,
-          project_id: subscription.project_id
-        };
-        
-        const donationId = await Donation.create(donationData);
-        console.log(`✅ Created donation record ${donationId} for recurring payment`);
-        
-        // Update project totals
-        if (subscription.project_id) {
-          await Project.addDonation(subscription.project_id, parseFloat(donationData.amount));
-          console.log(`📊 Updated project ${subscription.project_id} with donation ${donationData.amount}`);
+        // CRITICAL: Skip first invoice to prevent duplicate donation entries
+        // First payment is already handled by checkout.session.completed event
+        if (invoice.billing_reason === 'subscription_create') {
+          console.log(`ℹ️  Skipping first invoice - already handled by checkout.session.completed`);
+          break;
         }
         
-        // Reuse existing email functionality by creating a mock session object
-        const mockSession = {
-          id: `recurring-${donationId}`,
-          customer_details: {
-            email: subscription.donor_email,
-            name: subscription.donor_name
-          },
-          amount_total: invoice.amount_paid,
-          currency: invoice.currency,
-          payment_intent: invoice.payment_intent,
-          metadata: {
-            projectId: subscription.project_id
+        try {
+          // Look up subscription in database using Stripe subscription ID
+          const subscription = await Subscription.findByStripeId(subscriptionId);
+          if (!subscription) {
+            console.error(`❌ Subscription not found: ${subscriptionId}`);
+            break;
           }
-        };
-        
-        // Reuse the existing handleDonationSuccess function
-        await handleDonationSuccess(mockSession);
-        console.log(`✅ Recurring payment processed successfully`);
+          
+          // =================================================================
+          // GET TRANSACTION REFERENCE FOR RECURRING SUBSCRIPTION PAYMENT
+          // =================================================================
+          // For recurring payments, we use the invoice ID (in_xxxxx) from the
+          // invoice.payment_succeeded webhook event as the transaction reference.
+          // 
+          // Why invoice ID?
+          // - Each billing cycle creates a new unique invoice
+          // - Consistent with first payment approach (both use invoice IDs)
+          // - Works reliably in production, test mode, and with test clocks
+          // - Allows easy lookup in Stripe Dashboard for payment verification
+          // =================================================================
+          const paymentIntentId = invoice.id;
+          
+          // Create new donation record for this recurring payment
+          const donationData = {
+            donor_id: subscription.donor_id,
+            amount: (invoice.amount_paid / 100).toFixed(2), // Convert cents to dollars
+            currency: invoice.currency,
+            status: "completed",
+            interval: subscription.interval,
+            stripe_payment_intent: paymentIntentId,  // Stores invoice ID (in_xxxxx) for subscriptions
+            stripe_subscription_id: subscriptionId,
+            project_id: subscription.project_id
+          };
+          
+          const donationId = await Donation.create(donationData);
+          console.log(`✅ Recurring payment: $${donationData.amount} - Donation #${donationId} - Invoice: ${paymentIntentId}`);
+          
+          // Update project funding total with new payment
+          if (subscription.project_id) {
+            await Project.addDonation(subscription.project_id, parseFloat(donationData.amount));
+          }
+          
+          // Update subscription with next billing date and ensure active status
+          const nextBillingDate = new Date(invoice.lines.data[0].period.end * 1000);
+          await Subscription.updateById(subscription.id, { 
+            status: "active",
+            next_billing_date: nextBillingDate
+          });
+          
+          // Send confirmation email with PDF receipt
+          const mockSession = {
+            id: `recurring-${donationId}`, // Prefix identifies this as recurring
+            customer_details: {
+              email: subscription.donor_email,
+              name: subscription.donor_name
+            },
+            amount_total: invoice.amount_paid, // Already in cents from Stripe
+            currency: invoice.currency,
+            payment_intent: paymentIntentId,  // Invoice ID (in_xxxxx) for subscription
+            metadata: {
+              projectId: subscription.project_id,
+              donationId: donationId
+            }
+          };
+          
+          await handleDonationSuccess(mockSession);
+        } catch (error) {
+          console.error(`❌ Error in invoice.payment_succeeded: ${error.message}`);
+          console.error(error.stack);
+          throw error;
+        }
         
         break;
       }
 
+      // ----------------------------------------------------------------
+      // EVENT: invoice.payment_failed
+      // Triggered when recurring subscription payment fails
+      // Implements retry logic and auto-cancellation after 5 attempts
+      // ----------------------------------------------------------------
       case "invoice.payment_failed": {
         const invoice = event.data.object;
         console.log(`❌ Recurring payment failed for subscription: ${invoice.subscription}`);
         
-        // Find the subscription in our database
+        // Look up subscription in database
         const subscription = await Subscription.findByStripeId(invoice.subscription);
         if (!subscription) {
           console.error(`❌ Subscription not found: ${invoice.subscription}`);
           break;
         }
         
-        // Update subscription status to past_due
+        // Mark subscription as past_due (Stripe will retry automatically)
         await Subscription.updateById(subscription.id, { status: "past_due" });
         console.log(`⚠️ Updated subscription ${subscription.id} status to past_due`);
         
-        // Check if this is a retry attempt or first failure
+        // Track attempt count for retry logic
         const attemptCount = invoice.attempt_count || 1;
         const isRetry = attemptCount > 1;
         
-        // Auto-cancel subscription after 5 failed attempts
+        // Auto-cancel subscription after 5 failed payment attempts
         if (attemptCount >= 5) {
           console.log(`🚫 Auto-canceling subscription after ${attemptCount} failed attempts`);
+          
+          // Cancel subscription in Stripe
           await stripe.subscriptions.cancel(invoice.subscription);
+          
+          // Update subscription status in database
           await Subscription.updateById(subscription.id, { status: "canceled" });
           
-          // Send cancellation notification email
+          // Notify donor about cancellation due to repeated payment failures
           if (subscription.donor_email) {
             console.log(`📧 Sending subscription cancellation notification to: ${subscription.donor_email}`);
             
@@ -425,14 +741,16 @@ exports.stripeWebhookHandler = async (req, res) => {
           }
         }
         
-        // Send notification email to donor about failed payment (only if not cancelled)
+        // Send payment failure notification to donor (only if not cancelled yet)
         if (subscription.donor_email && attemptCount < 5) {
           console.log(`📧 Sending payment failure notification to: ${subscription.donor_email} (attempt ${attemptCount})`);
           
+          // Customize subject line based on retry attempt
           const subject = isRetry 
             ? `Payment Still Failed - Attempt ${attemptCount}`
             : "Payment Failed - Action Required";
           
+          // Provide retry information to donor
           const retryInfo = isRetry 
             ? `<p><strong>This was attempt #${attemptCount}</strong> - Stripe will continue retrying automatically.</p>`
             : `<p>Stripe will automatically retry this payment in a few days.</p>`;
@@ -473,10 +791,274 @@ exports.stripeWebhookHandler = async (req, res) => {
         break;
       }
 
+      // ----------------------------------------------------------------
+      // EVENT: customer.subscription.updated
+      // Triggered when subscription details change (amount, status, etc.)
+      // ----------------------------------------------------------------
+      case "customer.subscription.updated": {
+        const stripeSubscription = event.data.object;
+        
+        try {
+          // Look up subscription in database
+          const subscription = await Subscription.findByStripeId(stripeSubscription.id);
+          if (!subscription) {
+            console.error(`❌ Subscription not found: ${stripeSubscription.id}`);
+            break;
+          }
+          
+          // Extract new amount from Stripe subscription object
+          // Amount is nested in items.data[0].price.unit_amount
+          const newAmount = stripeSubscription.items?.data?.[0]?.price?.unit_amount;
+          if (!newAmount) {
+            console.error(`❌ Could not extract amount from subscription update`);
+            break;
+          }
+          
+          // Convert amounts for comparison (cents to dollars)
+          const newAmountDecimal = (newAmount / 100).toFixed(2);
+          const oldAmount = parseFloat(subscription.amount).toFixed(2);
+          
+          // Skip if amount hasn't changed (could be status-only update)
+          if (newAmountDecimal === oldAmount) {
+            break;
+          }
+          
+          // Update subscription in database with new amount and status
+          await Subscription.updateById(subscription.id, { 
+            amount: newAmountDecimal,
+            status: stripeSubscription.status
+          });
+          console.log(`✅ Subscription amount updated: $${oldAmount} → $${newAmountDecimal}`);
+          
+          // Notify donor about subscription amount change
+          if (subscription.donor_email) {
+            const emailOptions = {
+              from: `"Africa Access Water" <${config.email.user}>`,
+              to: subscription.donor_email,
+              subject: "Your Recurring Donation Amount Has Been Updated",
+              html: subscriptionAmountUpdatedEmail(
+                subscription.donor_name || 'Valued Donor',
+                oldAmount,
+                newAmountDecimal,
+                subscription.currency.toUpperCase(),
+                subscription.interval,
+                stripeSubscription.status
+              )
+            };
+            
+            await sendMail(emailOptions);
+          }
+          
+          // Notify admins about subscription amount change
+          if (config.adminEmails && config.adminEmails.length > 0) {
+            const adminEmailOptions = {
+              from: `"Africa Access Water" <${config.email.user}>`,
+              to: config.adminEmails,
+              subject: `Subscription Amount Updated - ${subscription.donor_name || 'Unknown Donor'}`,
+              html: adminSubscriptionAmountUpdatedEmail(
+                subscription.donor_name,
+                subscription.donor_email,
+                oldAmount,
+                newAmountDecimal,
+                subscription.currency.toUpperCase(),
+                subscription.interval,
+                subscription.id,
+                stripeSubscription.id
+              )
+            };
+            
+            await sendMail(adminEmailOptions);
+          }
+        } catch (error) {
+          console.error(`❌ Error in customer.subscription.updated: ${error.message}`);
+          console.error(error.stack);
+          throw error;
+        }
+        
+        break;
+      }
+
+      // ----------------------------------------------------------------
+      // EVENT: customer.subscription.deleted
+      // Triggered when a subscription is cancelled by user or admin
+      // ----------------------------------------------------------------
+      case "customer.subscription.deleted": {
+        const stripeSubscription = event.data.object;
+        console.log(`🔔 Subscription deleted event received for: ${stripeSubscription.id}`);
+        
+        // Look up subscription in database
+        const subscription = await Subscription.findByStripeId(stripeSubscription.id);
+        if (!subscription) {
+          console.error(`❌ Subscription not found in database: ${stripeSubscription.id}`);
+          break;
+        }
+        
+        // Update subscription status to 'cancelled' in database
+        await Subscription.updateById(subscription.id, { status: "cancelled" });
+        console.log(`✅ Updated subscription ${subscription.id} status to 'cancelled'`);
+        
+        // Notify donor about subscription cancellation
+        if (subscription.donor_email) {
+          console.log(`📧 Sending subscription cancellation notification to: ${subscription.donor_email}`);
+          
+          const emailOptions = {
+            from: `"Africa Access Water" <${config.email.user}>`,
+            to: subscription.donor_email,
+            subject: "Your Recurring Donation Has Been Cancelled",
+            html: subscriptionCancelledEmail(
+              subscription.donor_name || 'Valued Donor',
+              subscription.amount,
+              subscription.currency.toUpperCase(),
+              subscription.interval
+            )
+          };
+          
+          await sendMail(emailOptions);
+          console.log(`✅ Subscription cancellation notification sent to ${subscription.donor_email}`);
+        }
+        
+        // Notify admins about the cancellation for tracking
+        if (config.adminEmails && config.adminEmails.length > 0) {
+          console.log(`📧 Notifying admins about subscription cancellation`);
+          
+          const adminEmailOptions = {
+            from: `"Africa Access Water" <${config.email.user}>`,
+            to: config.adminEmails,
+            subject: `Subscription Cancelled - ${subscription.donor_name || 'Unknown Donor'}`,
+            html: adminSubscriptionCancelledEmail(
+              subscription.donor_name,
+              subscription.donor_email,
+              subscription.amount,
+              subscription.currency.toUpperCase(),
+              subscription.interval,
+              subscription.id,
+              stripeSubscription.id
+            )
+          };
+          
+          await sendMail(adminEmailOptions);
+          console.log(`✅ Admin notification sent about subscription cancellation`);
+        }
+        
+        break;
+      }
+
+      // ----------------------------------------------------------------
+      // EVENT: charge.refunded
+      // Triggered when a charge is refunded (full or partial)
+      // Updates donation status and adjusts project totals
+      // No partial refunds workflow implemented yet. Only full refunds.
+      // ----------------------------------------------------------------
+      case "charge.refunded": {
+        const charge = event.data.object;
+        console.log(`💸 Refund processed for charge: ${charge.id}`);
+        
+        try {
+          const originalAmount = (charge.amount / 100).toFixed(2); // Convert cents to dollars
+          const refundedAmount = (charge.amount_refunded / 100).toFixed(2);
+          const paymentIntentId = charge.payment_intent;
+          const currency = charge.currency;
+          const chargeId = charge.id;
+          
+          // Look up donation by payment intent or charge ID
+          let donation = await Donation.findByPaymentIntent(paymentIntentId);
+          let invoiceId = null;
+          // For Subscriptions: Try to find by Invoice ID if payment intent lookup fails 
+          if (!donation && paymentIntentId) {
+            const invoicePayments = await stripe.invoicePayments.list({
+            'payment[type]': 'payment_intent',
+            'payment[payment_intent]': paymentIntentId,
+            });
+            invoiceId = invoicePayments.data[0]?.invoice; // "in_1SW5RuF..."
+            if (invoiceId) {
+              donation = await Donation.findByPaymentIntent(invoiceId);
+            }
+          } 
+          if (!donation) {
+            console.error(`❌ Donation not found for invoice: ${invoiceId}, payment_intent: ${paymentIntentId}`);
+            break;
+          }
+          
+          console.log(`📝 Found donation #${donation.id} - Original amount: ${donation.amount}, Status: ${donation.status}`);
+
+          // Update donation record with refund information
+          const updateData = {
+            status: "refunded",
+          };
+          
+          await Donation.updateById(donation.id, updateData);
+          console.log(`✅ Updated donation #${donation.id} status to 'refunded'`);
+          
+          // Deduct refunded amount from project total (if donation was linked to a project)
+          if (donation.project_id) {
+            // Use negative value to subtract from project total
+            await Project.addDonation(donation.project_id, -parseFloat(refundedAmount));
+            console.log(`📌 Project #${donation.project_id} Amount reduced by ${currency} ${refundedAmount}`);
+          }
+          
+          // Fetch donor information for notifications
+          const donor = await Donor.findById(donation.donor_id);
+          
+          // Send refund confirmation email to donor
+          if (donor && donor.email) {
+            console.log(`📧 Sending refund confirmation to: ${donor.email}`);
+            
+            const refundEmailOptions = {
+              from: `"Africa Access Water" <${config.email.user}>`,
+              to: donor.email,
+              subject: `Refund Processed - ${currency.toUpperCase()} ${refundedAmount}`,
+              html: donorRefundConfirmationEmail(
+                donor.name,
+                refundedAmount,
+                originalAmount,
+                currency,
+                chargeId,
+              )
+            };
+            
+            await sendMail(refundEmailOptions);
+            console.log(`✅ Refund confirmation email sent to ${donor.email}`);
+          }
+          
+          // Notify admins about the refund
+          if (config.adminEmails && config.adminEmails.length > 0) {
+            console.log(`📧 Notifying admins about refund`);
+            
+            const adminRefundEmailOptions = {
+              from: `"Africa Access Water" <${config.email.user}>`,
+              to: config.adminEmails,
+              subject: `Refund Processed - ${donor ? donor.name : 'Unknown Donor'}`,
+              html: adminRefundNotificationEmail(
+                donor ? donor.name : null,
+                donor ? donor.email : null,
+                refundedAmount,
+                originalAmount,
+                currency,
+                donation.id,
+                charge.id,
+                paymentIntentId,
+                donation.project_id
+              )
+            };
+            
+            await sendMail(adminRefundEmailOptions);
+            console.log(`✅ Admin refund notification sent`);
+          }
+          
+        } catch (error) {
+          console.error(`❌ Error processing refund: ${error.message}`);
+          console.error(error.stack);
+          throw error;
+        }
+        
+        break;
+      }
+
       default:
         console.log(`Unhandled event type ${event.type}`);
     }
 
+    // Acknowledge webhook receipt to Stripe
     res.json({ received: true });
   } catch (err) {
     console.error("Webhook handling error:", err);
@@ -484,45 +1066,66 @@ exports.stripeWebhookHandler = async (req, res) => {
   }
 };
 
+// ============================================================================
+// QUERY ENDPOINTS (GET)
+// ============================================================================
+
 /**
- * Get all donations
+ * Get All Donations
+ * Retrieves all donation records with donor information
+ * 
+ * @route GET /api/donations
+ * @access Admin (typically protected by middleware)
+ * 
+ * @returns {Array} Array of donation objects with donor details
  */
 exports.getDonations = async (req, res) => {
   try {
-    // Extract possible filter params
+    // Extract possible filter parameters from query string
     const { donor_id, status, name, currency, project_id, stripe_subscription_id, ...rest } = req.query;
 
-    // Helper to filter by params
+    // Helper function to apply filters to donation/subscription records
     const filterFn = (item) => {
+      // Filter by donor ID
       if (donor_id && item.donor_id != donor_id) return false;
+      
+      // Filter by status (completed, pending, failed, etc.)
       if (status && item.status != status) return false;
+      
+      // Filter by donor name (case-insensitive partial match)
       if (name && item.name && !item.name.toLowerCase().includes(name.toLowerCase())) return false;
+      
+      // Filter by currency (USD, EUR, etc.)
       if (currency && item.currency != currency) return false;
+      
+      // Filter by project ID
       if (project_id && item.project_id != project_id) return false;
-      // Add more filters as needed
-      // Generic filter for any other param
+      
+      // Generic filter for any additional query parameters
       for (const key in rest) {
         if (item[key] && item[key] != rest[key]) return false;
       }
+      
       return true;
     };
 
-    // Fetch one-time donations
+    // Fetch all one-time donations from database
     let donations = await Donation.findAll();
-    // Fetch recurring subscriptions
+    
+    // Fetch all recurring subscriptions from database
     let subscriptions = await Subscription.findAll();
 
-    // Apply filters
+    // Apply filters to both datasets
     donations = donations.filter(filterFn);
     subscriptions = subscriptions.filter(filterFn);
 
-    // Combine them, optionally add a type field
+    // Combine donations and subscriptions with type indicator
     const allDonations = [
       ...donations.map((d) => ({ ...d, type: "one-time" })),
       ...subscriptions.map((s) => ({ ...s, type: "subscription" })),
     ];
 
-    // Sort by creation date (latest first)
+    // Sort by creation date (most recent first)
     allDonations.sort(
       (a, b) => new Date(b.created_at) - new Date(a.created_at)
     );
@@ -535,7 +1138,13 @@ exports.getDonations = async (req, res) => {
 };
 
 /**
- * Get all donors
+ * Get All Donors
+ * Retrieves all donor records
+ * 
+ * @route GET /api/donors
+ * @access Admin (typically protected by middleware)
+ * 
+ * @returns {Array} Array of donor objects
  */
 exports.getDonors = async (req, res) => {
   try {
@@ -547,9 +1156,21 @@ exports.getDonors = async (req, res) => {
   }
 };
 
+/**
+ * Get Project with Donations
+ * Retrieves a project with all associated donations
+ * 
+ * @route GET /api/projects/:id/donations
+ * @access Public
+ * 
+ * @param {number} id - Project ID from URL params
+ * @returns {Object} Project object with donations array
+ */
 exports.getProjectWithDonations = async (req, res) => {
   try {
     const { id } = req.params;
+    
+    // Fetch project with associated donations
     const project = await Project.findWithDonations(id);
 
     if (!project) {
@@ -559,6 +1180,135 @@ exports.getProjectWithDonations = async (req, res) => {
     res.json(project);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+
+// ============================================================================
+// REFUND ENDPOINT
+// ============================================================================
+
+/**
+ * Process Refund
+ * Manually refund a donation using Stripe API
+ * 
+ * @route POST /api/donations/refund
+ * @access Admin (should be protected by auth middleware)
+ * 
+ * @body {string} id - Payment Intent ID (pi_xxx) or Invoice ID (in_xxx)
+ * @body {number} amount - Optional amount in cents for partial refund
+ * 
+ * @returns {Object} { success: true, refund: StripeRefund }
+ * 
+ * @example
+ * // Full refund with Payment Intent
+ * POST /api/donations/refund
+ * { "id": "pi_3P1234567890XYZ" }
+ * 
+ * // Partial refund with Payment Intent
+ * POST /api/donations/refund
+ * { "id": "pi_3P1234567890XYZ", "amount": 5000 }
+ * 
+ * // Full refund with Invoice ID (for subscriptions)
+ * POST /api/donations/refund
+ * { "id": "in_1SW5RuF..." }
+ */
+exports.processRefund = async (req, res) => {
+  try {
+    const { id, amount } = req.body;
+
+    // Validate required parameters
+    if (!id) {
+      return res.status(400).json({ error: "Missing id parameter" });
+    }
+
+    console.log(`🔄 Processing refund request for ID: ${id}${amount ? ` (amount: ${amount})` : ' (full refund)'}`);
+
+    // ================================================================================
+    // CASE 1: Payment Intent (One-time donations)
+    // Payment Intent IDs start with "pi_"
+    // ================================================================================
+    if (id.startsWith("pi_")) {
+      console.log(`💳 Processing Payment Intent refund: ${id}`);
+      
+      const refund = await stripe.refunds.create({
+        payment_intent: id,
+        ...(amount ? { amount } : {}), // Include amount only if provided (partial refund)
+      });
+
+      console.log(`✅ Refund processed successfully: ${refund.id}`);
+      return res.json({ 
+        success: true, 
+        refund,
+        message: amount ? 'Partial refund processed successfully' : 'Full refund processed successfully'
+      });
+    }
+
+    // ================================================================================
+    // CASE 2: Invoice ID (Recurring subscription donations)
+    // Invoice IDs start with "in_"
+    // For invoices, we need to find the associated Payment Intent first
+    // ================================================================================
+    if (id.startsWith("in_")) {
+      console.log(`📄 Processing Invoice refund: ${id}`);
+      
+      // Get all payments associated with this invoice
+      const payments = await stripe.invoicePayments.list({
+        invoice: id,
+      });
+
+      console.log(`📋 Found ${payments.data.length} payment(s) for invoice ${id}`);
+
+      // Find the paid Payment Intent from the invoice payments
+      const piPayment = payments.data.find(
+        (p) =>
+          p.payment?.type === "payment_intent" &&
+          p.status === "paid"
+      );
+
+      if (!piPayment) {
+        console.error(`❌ No paid PaymentIntent found for invoice ${id}`);
+        return res.status(404).json({ 
+          error: "No paid PaymentIntent found for this invoice",
+          details: "This invoice may not have been paid yet or payment was not processed via PaymentIntent"
+        });
+      }
+
+      const paymentIntentId = piPayment.payment.payment_intent;
+      console.log(`💳 Found Payment Intent: ${paymentIntentId}`);
+
+      // Process refund using the found Payment Intent
+      const refund = await stripe.refunds.create({
+        payment_intent: paymentIntentId,
+        ...(amount ? { amount } : {}), // Include amount only if provided (partial refund)
+      });
+
+      console.log(`✅ Invoice refund processed successfully: ${refund.id}`);
+      return res.json({ 
+        success: true, 
+        refund,
+        invoice_id: id,
+        payment_intent_id: paymentIntentId,
+        message: amount ? 'Partial refund processed successfully' : 'Full refund processed successfully'
+      });
+    }
+
+    // ================================================================================
+    // Invalid ID format
+    // ================================================================================
+    console.error(`❌ Invalid ID format: ${id}`);
+    return res.status(400).json({ 
+      error: "Invalid id format",
+      details: "ID must start with 'pi_' (Payment Intent) or 'in_' (Invoice)"
+    });
+
+  } catch (err) {
+    console.error("❌ Refund error:", err.message);
+    console.error(err.stack);
+    
+    return res.status(500).json({ 
+      error: err.message,
+      type: err.type || 'api_error'
+    });
   }
 };
 

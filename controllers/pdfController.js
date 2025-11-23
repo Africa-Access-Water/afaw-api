@@ -16,13 +16,18 @@ const generateDonationReceipt = async (req, res) => {
 
         const pdfBuffer = await generateDonationReceiptPDFBuffer(donation);
 
+        // Check if PDF generation failed (returns null on failure)
+        if (!pdfBuffer) {
+            return res.status(500).json({ error: 'Failed to generate receipt PDF' });
+        }
+
         // Send PDF as download
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename=Receipt-${donation.id}.pdf`);
         res.send(pdfBuffer);
 
     } catch (err) {
-        console.error(err);
+        console.error('❌ Unexpected error in generateDonationReceipt:', err);
         res.status(500).json({ error: 'Failed to generate receipt PDF' });
     }
 };
@@ -66,8 +71,9 @@ const generateDonationReceiptPDFBuffer = async (donation) => {
 
         return pdfBuffer;
     } catch (err) {
-        console.error('Failed to generate receipt PDF buffer:', err);
-        throw err;
+        console.error('❌ Failed to generate receipt PDF buffer:', err.message);
+        // Return null instead of throwing to make PDF generation non-blocking
+        return null;
     }
 };
 

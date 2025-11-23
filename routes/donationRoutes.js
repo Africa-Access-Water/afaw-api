@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const donationController = require('../controllers/donationController');
+const { requireAdmin } = require('../middleware/roleMiddleware');
 
 
 
@@ -8,6 +9,9 @@ const donationController = require('../controllers/donationController');
 
 router.post('/donate', donationController.createCheckoutSession);
 router.post('/subscribe', donationController.createSubscription);
+
+// --- Refund Route ---
+router.post('/refund', requireAdmin(), donationController.processRefund); // Admin: process refund
 
 // --- Donation Data Routes ---
 router.get('/', donationController.getDonations); // all donations (admin)

@@ -2,11 +2,18 @@ const knex = require("../config/db");
 
 const UserModel = {
   async create(userData) {
+    // Convert email to lowercase before storing
+    if (userData.email) {
+      userData.email = userData.email.toLowerCase();
+    }
     return await knex("users").insert(userData).returning("*");
   },
 
   async findByEmail(email) {
-    return await knex("users").where({ email }).first();
+    // Case-insensitive email search
+    return await knex("users")
+      .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
+      .first();
   },
 
   async findById(id) {
@@ -25,6 +32,10 @@ const UserModel = {
   },
 
   async update(id, updateData) {
+    // Convert email to lowercase if being updated
+    if (updateData.email) {
+      updateData.email = updateData.email.toLowerCase();
+    }
     return await knex("users")
       .where({ id })
       .update(updateData)
@@ -32,8 +43,9 @@ const UserModel = {
   },
 
   async setResetToken(email, resetToken, expiryTime) {
+    // Case-insensitive email lookup
     return await knex("users")
-      .where({ email })
+      .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
       .update({
         reset_token: resetToken,
         reset_token_expires: expiryTime
