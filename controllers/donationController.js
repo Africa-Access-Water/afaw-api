@@ -325,7 +325,7 @@ exports.createCheckoutSession = async (req, res) => {
 exports.createSubscription = async (req, res) => {
   req.body.recurring = true;
   req.body.interval = req.body.interval || "month"; // Default to monthly
-  console.log("Creating subscription with body:", req.body);
+  console.log("Creating subscription with interval:", req.body.interval);
   return exports.createCheckoutSession(req, res);
 };
 
@@ -962,19 +962,17 @@ exports.stripeWebhookHandler = async (req, res) => {
           
           // Look up donation by payment intent or charge ID
           let donation = await Donation.findByPaymentIntent(paymentIntentId);
-          
+          let invoiceId = null;
           // For Subscriptions: Try to find by Invoice ID if payment intent lookup fails 
           if (!donation && paymentIntentId) {
-              const invoicePayments = await stripe.invoicePayments.list({
-              'payment[type]': 'payment_intent',
-              'payment[payment_intent]': paymentIntentId,
-              });
-
-              const invoiceId = invoicePayments.data[0]?.invoice; // "in_1SW5RuF..."
-              if (invoiceId) {
-                donation = await Donation.findByPaymentIntent(invoiceId);
-              
-              }
+            const invoicePayments = await stripe.invoicePayments.list({
+            'payment[type]': 'payment_intent',
+            'payment[payment_intent]': paymentIntentId,
+            });
+            invoiceId = invoicePayments.data[0]?.invoice; // "in_1SW5RuF..."
+            if (invoiceId) {
+              donation = await Donation.findByPaymentIntent(invoiceId);
+            }
           } 
           if (!donation) {
             console.error(`❌ Donation not found for invoice: ${invoiceId}, payment_intent: ${paymentIntentId}`);
@@ -994,7 +992,7 @@ exports.stripeWebhookHandler = async (req, res) => {
           // Deduct refunded amount from project total (if donation was linked to a project)
           if (donation.project_id) {
             // Use negative value to subtract from project total
-            await Project.addDonation(donation.project_id, -refundedAmount);
+            await Project.addDonation(donation.project_id, -parseFloat(refundedAmount));
             console.log(`📌 Project #${donation.project_id} Amount reduced by ${currency} ${refundedAmount}`);
           }
           

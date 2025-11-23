@@ -461,7 +461,7 @@ function adminSubscriptionCancelledEmail(donorName, donorEmail, amount, currency
  * @param {string} refundedAmount - Amount refunded
  * @param {string} originalAmount - Original donation amount
  * @param {string} currency - Currency code (e.g., 'USD')
- * @param {number} donationId - Transaction ID
+ * @param {string} chargeId - Stripe charge ID
  * @returns {string} HTML email template
  */
 function donorRefundConfirmationEmail(donorName, refundedAmount, originalAmount, currency, chargeId) {
