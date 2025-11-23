@@ -1185,3 +1185,132 @@ exports.getProjectWithDonations = async (req, res) => {
   }
 };
 
+// ============================================================================
+// REFUND ENDPOINT
+// ============================================================================
+
+/**
+ * Process Refund
+ * Manually refund a donation using Stripe API
+ * 
+ * @route POST /api/donations/refund
+ * @access Admin (should be protected by auth middleware)
+ * 
+ * @body {string} id - Payment Intent ID (pi_xxx) or Invoice ID (in_xxx)
+ * @body {number} amount - Optional amount in cents for partial refund
+ * 
+ * @returns {Object} { success: true, refund: StripeRefund }
+ * 
+ * @example
+ * // Full refund with Payment Intent
+ * POST /api/donations/refund
+ * { "id": "pi_3P1234567890XYZ" }
+ * 
+ * // Partial refund with Payment Intent
+ * POST /api/donations/refund
+ * { "id": "pi_3P1234567890XYZ", "amount": 5000 }
+ * 
+ * // Full refund with Invoice ID (for subscriptions)
+ * POST /api/donations/refund
+ * { "id": "in_1SW5RuF..." }
+ */
+exports.processRefund = async (req, res) => {
+  try {
+    const { id, amount } = req.body;
+
+    // Validate required parameters
+    if (!id) {
+      return res.status(400).json({ error: "Missing id parameter" });
+    }
+
+    console.log(`🔄 Processing refund request for ID: ${id}${amount ? ` (amount: ${amount})` : ' (full refund)'}`);
+
+    // ================================================================================
+    // CASE 1: Payment Intent (One-time donations)
+    // Payment Intent IDs start with "pi_"
+    // ================================================================================
+    if (id.startsWith("pi_")) {
+      console.log(`💳 Processing Payment Intent refund: ${id}`);
+      
+      const refund = await stripe.refunds.create({
+        payment_intent: id,
+        ...(amount ? { amount } : {}), // Include amount only if provided (partial refund)
+      });
+
+      console.log(`✅ Refund processed successfully: ${refund.id}`);
+      return res.json({ 
+        success: true, 
+        refund,
+        message: amount ? 'Partial refund processed successfully' : 'Full refund processed successfully'
+      });
+    }
+
+    // ================================================================================
+    // CASE 2: Invoice ID (Recurring subscription donations)
+    // Invoice IDs start with "in_"
+    // For invoices, we need to find the associated Payment Intent first
+    // ================================================================================
+    if (id.startsWith("in_")) {
+      console.log(`📄 Processing Invoice refund: ${id}`);
+      
+      // Get all payments associated with this invoice
+      const payments = await stripe.invoicePayments.list({
+        invoice: id,
+      });
+
+      console.log(`📋 Found ${payments.data.length} payment(s) for invoice ${id}`);
+
+      // Find the paid Payment Intent from the invoice payments
+      const piPayment = payments.data.find(
+        (p) =>
+          p.payment?.type === "payment_intent" &&
+          p.status === "paid"
+      );
+
+      if (!piPayment) {
+        console.error(`❌ No paid PaymentIntent found for invoice ${id}`);
+        return res.status(404).json({ 
+          error: "No paid PaymentIntent found for this invoice",
+          details: "This invoice may not have been paid yet or payment was not processed via PaymentIntent"
+        });
+      }
+
+      const paymentIntentId = piPayment.payment.payment_intent;
+      console.log(`💳 Found Payment Intent: ${paymentIntentId}`);
+
+      // Process refund using the found Payment Intent
+      const refund = await stripe.refunds.create({
+        payment_intent: paymentIntentId,
+        ...(amount ? { amount } : {}), // Include amount only if provided (partial refund)
+      });
+
+      console.log(`✅ Invoice refund processed successfully: ${refund.id}`);
+      return res.json({ 
+        success: true, 
+        refund,
+        invoice_id: id,
+        payment_intent_id: paymentIntentId,
+        message: amount ? 'Partial refund processed successfully' : 'Full refund processed successfully'
+      });
+    }
+
+    // ================================================================================
+    // Invalid ID format
+    // ================================================================================
+    console.error(`❌ Invalid ID format: ${id}`);
+    return res.status(400).json({ 
+      error: "Invalid id format",
+      details: "ID must start with 'pi_' (Payment Intent) or 'in_' (Invoice)"
+    });
+
+  } catch (err) {
+    console.error("❌ Refund error:", err.message);
+    console.error(err.stack);
+    
+    return res.status(500).json({ 
+      error: err.message,
+      type: err.type || 'api_error'
+    });
+  }
+};
+
