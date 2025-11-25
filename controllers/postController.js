@@ -2,6 +2,7 @@ const { cloudinary, postMediaStorage } = require("../utils/cloudinary");
 const multer = require("multer");
 const upload = multer({ storage: postMediaStorage });
 const db = require("../config/db"); // or wherever your knex instance is
+const { getAllHandler, getByIdHandler, deleteHandler } = require("../utils/crudHelpers");
 
 // CREATE
 const createPost = async (req, res) => {
@@ -23,30 +24,10 @@ const createPost = async (req, res) => {
 };
 
 // READ ALL
-const getPosts = async (req, res) => {
-  try {
-    const posts = await db("posts").orderBy("created_at", "desc");
-    res.json(posts);
-  } catch (err) {
-    console.error("Error fetching posts:", err);
-    res.status(500).json({ error: "Failed to fetch posts" });
-  }
-};
+const getPosts = getAllHandler(db, "posts", "posts");
 
 // READ ONE
-const getPostById = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const post = await db("posts").where({ id }).first();
-
-    if (!post) return res.status(404).json({ error: "Post not found" });
-
-    res.json(post);
-  } catch (err) {
-    console.error("Error fetching post:", err);
-    res.status(500).json({ error: "Failed to fetch post" });
-  }
-};
+const getPostById = getByIdHandler(db, "posts", "Post");
 
 // UPDATE
 const updatePost = async (req, res) => {
@@ -71,19 +52,7 @@ const updatePost = async (req, res) => {
 };
 
 // DELETE
-const deletePost = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const deleted = await db("posts").where({ id }).del();
-
-    if (!deleted) return res.status(404).json({ error: "Post not found" });
-
-    res.json({ message: "Post deleted successfully" });
-  } catch (err) {
-    console.error("Error deleting post:", err);
-    res.status(500).json({ error: "Failed to delete post" });
-  }
-};
+const deletePost = deleteHandler(db, "posts", "Post");
 
 module.exports = {
   createPost,

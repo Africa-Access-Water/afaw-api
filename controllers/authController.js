@@ -5,6 +5,7 @@ const nodemailer = require("nodemailer");
 const UserModel = require("../models/userModel");
 const config = require("../config/config");
 const { passwordResetEmail } = require("../utils/emailTemplates");
+const { updateUserStatus } = require("../utils/userStatusHelper");
 
 const JWT_SECRET = config.jwtSecret;
 const DASHBOARD_URL = config.dashboardUrl;
@@ -255,33 +256,16 @@ const getPendingUsers = async (req, res) => {
 const approveUser = async (req, res) => {
   try {
     const { userId } = req.params;
-    
-    // Check if user exists and is pending
-    const user = await UserModel.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-    
-    if (user.status !== "pending") {
-      return res.status(400).json({ error: "User is not in pending status" });
-    }
-
-    // Update user status to accepted
-    const [updatedUser] = await UserModel.updateUserStatus(userId, "accepted");
+    const user = await updateUserStatus(userId, "accepted", "approve");
     
     res.json({ 
       message: "User approved successfully",
-      user: {
-        id: updatedUser.id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        role: updatedUser.role,
-        status: updatedUser.status
-      }
+      user
     });
   } catch (err) {
     console.error("Approve user error:", err);
-    res.status(500).json({ error: "Failed to approve user" });
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({ error: err.message || "Failed to approve user" });
   }
 };
 
@@ -289,33 +273,16 @@ const approveUser = async (req, res) => {
 const rejectUser = async (req, res) => {
   try {
     const { userId } = req.params;
-    
-    // Check if user exists and is pending
-    const user = await UserModel.findById(userId);
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-    
-    if (user.status !== "pending") {
-      return res.status(400).json({ error: "User is not in pending status" });
-    }
-
-    // Update user status to rejected
-    const [updatedUser] = await UserModel.updateUserStatus(userId, "rejected");
+    const user = await updateUserStatus(userId, "rejected", "reject");
     
     res.json({ 
       message: "User rejected successfully",
-      user: {
-        id: updatedUser.id,
-        name: updatedUser.name,
-        email: updatedUser.email,
-        role: updatedUser.role,
-        status: updatedUser.status
-      }
+      user
     });
   } catch (err) {
     console.error("Reject user error:", err);
-    res.status(500).json({ error: "Failed to reject user" });
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({ error: err.message || "Failed to reject user" });
   }
 };
 

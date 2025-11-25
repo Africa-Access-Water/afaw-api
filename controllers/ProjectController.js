@@ -1,14 +1,6 @@
 const Project = require("../models/projectModel");
 const { cloudinary, upload } = require("../utils/cloudinary");
-
-// Helper: Extract Cloudinary public_id from URL
-function extractPublicId(url) {
-  if (!url) return null;
-  const parts = url.split("/");
-  const file = parts.pop().split(".")[0];
-  const folder = parts.slice(parts.indexOf("upload") + 1).join("/");
-  return folder ? `${folder}/${file}` : file;
-}
+const { extractPublicId } = require("../utils/cloudinaryHelper");
 
 class ProjectController {
   // CREATE
