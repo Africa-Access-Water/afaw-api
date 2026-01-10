@@ -6,7 +6,8 @@ module.exports = {
     client: 'pg',
     connection: {
       connectionString: config.databaseUrl,
-      ssl: { rejectUnauthorized: false }, // if your DB requires SSL, else false
+      // ssl: { rejectUnauthorized: false }, // if your DB requires SSL, else false
+      ssl: false
     },
     migrations: {
       directory: './migrations',

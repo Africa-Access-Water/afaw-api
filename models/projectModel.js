@@ -1,7 +1,23 @@
 const knex = require('../config/db');
 
 class Project {
+
+  static allowedStatuses = [
+    'upcoming',
+    'ongoing',
+    'completed',
+    'draft',
+    'cancelled',
+  ];
+
+  static _validateStatus(status) {
+    if (status && !this.allowedStatuses.includes(status)) {
+      throw new Error(`Invalid project status: ${status}`);
+    }
+  }
+
   static async create(data) {
+    this._validateStatus(data.status);
     if (data.media && Array.isArray(data.media)) {
       data.media = JSON.stringify(data.media);
     }
@@ -20,11 +36,12 @@ class Project {
   }
 
   static async update(id, data) {
+    this._validateStatus(data.status);
     if (data.media && Array.isArray(data.media)) {
       data.media = JSON.stringify(data.media);
     }
     await knex('projects').where({ id }).update(data);
-    return this.findById(id); // auto-parsed on return
+    return this.findById(id);
   }
 
   static async delete(id) {

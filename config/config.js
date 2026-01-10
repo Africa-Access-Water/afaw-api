@@ -17,6 +17,7 @@ const config = {
 
   // Database
   databaseUrl: process.env.DATABASE_URL,
+  // devdatabaseurl: process.env.DEV_DATABASE_URL,
 
   // Email
   email: {

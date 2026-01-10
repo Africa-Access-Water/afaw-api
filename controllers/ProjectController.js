@@ -11,9 +11,33 @@ function extractPublicId(url) {
 }
 
 class ProjectController {
+
+  static allowedStatuses = [
+    'upcoming',
+    'ongoing',
+    'completed',
+    'draft',
+    'cancelled',
+  ];
+
+  static validateStatus(status) {
+  if (!status) return;
+  if (!this.allowedStatuses.includes(status)) {
+    throw {
+      statusCode: 400,
+      message: `Invalid status. Allowed values: ${this.allowedStatuses.join(', ')}`,
+    };
+  }
+}
+
+
   // CREATE
   static async create(req, res) {
     try {
+
+      const { status } = req.body;
+      ProjectController.validateStatus(status);
+
       const { name, description, category, donation_goal, donation_raised } =
         req.body;
 
@@ -32,6 +56,7 @@ class ProjectController {
         pdf_document: pdfDocument,
         donation_goal: donation_goal ? parseFloat(donation_goal) : 0,
         donation_raised: donation_raised ? parseFloat(donation_raised) : 0,
+        status: status || 'draft',
       };
 
       const id = await Project.create(data);
@@ -46,6 +71,11 @@ class ProjectController {
 
   static async update(req, res) {
     try {
+
+      // this.validateStatus(req.body.status);
+      ProjectController.validateStatus(req.body.status);
+
+
       const project = await Project.findById(req.params.id);
       if (!project) return res.status(404).json({ error: "Project not found" });
 
@@ -116,6 +146,7 @@ class ProjectController {
         name: req.body.name ?? project.name,
         description: req.body.description ?? project.description,
         category: req.body.category ?? project.category,
+        status: req.body.status ?? project.status,
         cover_image: coverImage,
         media: JSON.stringify(media), // stringify final array
         pdf_document: pdfDocument,
